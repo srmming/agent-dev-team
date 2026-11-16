@@ -49,9 +49,9 @@ def push_args(cwd):
     """回滚后推送用的参数。和守卫的上传关同一套规则：守卫看不懂的、有没审核提交的，这里也不推。
     返回 (不推的原因, None) 或 (None, 传给推送命令的参数)。审核关关掉时不查，照平常那样推。"""
     if os.environ.get("AGENT_DEV_TEAM_CODEX", "").lower() == "off":
-        return None, []
+        return None, ["--no-follow-tags"]
     import guard  # 放这里导入，回滚的其他部分不依赖它
-    plan = guard.push_plan(cwd, [])
+    plan = guard.push_plan(cwd, ["--no-follow-tags"])  # 仓库开了 push.followTags 也能推：自己带上，不顺带推标签
     if isinstance(plan, str):
         return plan, None
     missing = guard.uncovered(cwd, f"{plan['base']}..{plan['tip']}")
@@ -61,7 +61,7 @@ def push_args(cwd):
         return (f"要推的提交里有 {len(missing)} 个没通过审核（{' '.join(s[:12] for s in missing[:5])}）。"
                 "先处理这些提交再推。"), None
     # 两边都写明：推什么、推到哪不受仓库配置影响
-    return None, [plan["remote"], f"{plan['tip']}:refs/heads/{plan['target']}"]
+    return None, ["--no-follow-tags", plan["remote"], f"{plan['tip']}:refs/heads/{plan['target']}"]
 
 
 def main(argv=None):
