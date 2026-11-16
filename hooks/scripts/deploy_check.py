@@ -10,15 +10,13 @@ import json
 import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import git, project_config, repo_root  # noqa: E402
+from common import TAIL, git, project_config, repo_root, run_shell as _run_shell, tail  # noqa: E402
 
-TAIL = 30
 CMD_TIMEOUT = 300
 CHECK_OK = {"success", "neutral", "skipped"}
 DEPLOY_OK = {"success", "inactive"}
@@ -26,23 +24,9 @@ DEPLOY_BAD = {"failure", "error"}
 STATUS_BAD = {"failure", "error"}
 
 
-def tail(text, n=TAIL):
-    return "\n".join(text.rstrip().splitlines()[-n:])
-
-
 def run_shell(cmd, cwd, timeout=CMD_TIMEOUT):
-    p = subprocess.Popen(cmd, shell=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                         text=True, errors="replace", start_new_session=True)
-    try:
-        out, _ = p.communicate(timeout=timeout)
-        return p.returncode, out or ""
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except OSError:
-            pass
-        out, _ = p.communicate()
-        return None, (out or "") + f"\n（超时 {timeout} 秒）"
+    code, out = _run_shell(cmd, cwd, timeout)
+    return code, out if code is not None else out + f"\n（超时 {timeout} 秒）"
 
 
 # ---- GitHub 查询。测试里会替换 have_gh 和 gh_api ----
@@ -247,8 +231,6 @@ def main(argv=None):
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except SystemExit:
-        raise
     except Exception as e:  # noqa: BLE001  脚本自己出错时给出明确结论，不让负责人当成别的结果
         print('上线检查：无法判断' + "\n脚本自己出错：" + repr(e))
         sys.exit(3)

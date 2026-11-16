@@ -5,47 +5,10 @@
 import argparse
 import fnmatch
 import os
-import signal
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import git, repo_root  # noqa: E402
-
-TAIL = 30
-
-
-def default_branch(cwd):
-    """默认主分支：origin/HEAD 指向的分支，没有就找本地的 main、master。"""
-    head = git(cwd, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
-    if head:
-        return head[len("origin/"):] if head.startswith("origin/") else head
-    for b in ("main", "master"):
-        if git(cwd, "rev-parse", "--verify", "--quiet", "refs/heads/" + b):
-            return b
-    return None
-
-
-def run_shell(cmd, cwd, timeout):
-    """用 shell 跑命令，返回 (退出码或 None 表示超时, 合并后的输出)。超时会杀掉整个进程组。"""
-    p = subprocess.Popen(cmd, shell=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                         text=True, errors="replace", start_new_session=True)
-    try:
-        out, _ = p.communicate(timeout=timeout)
-        return p.returncode, out or ""
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except OSError:
-            pass
-        out, _ = p.communicate()
-        return None, out or ""
-
-
-def tail(text, n=TAIL):
-    lines = text.rstrip().splitlines()
-    return "\n".join(lines[-n:])
-
+from common import TAIL, default_branch, git, repo_root, run_shell, tail  # noqa: E402
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="验收：查改动范围、跑完成标准命令，只打印结论。")
@@ -107,8 +70,6 @@ def main(argv=None):
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except SystemExit:
-        raise
     except Exception as e:  # noqa: BLE001  脚本自己出错时给出明确结论，不让负责人当成别的结果
         print('验收：出错' + "\n脚本自己出错：" + repr(e))
         sys.exit(2)

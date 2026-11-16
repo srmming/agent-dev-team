@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import signal
 import subprocess
 
 KUAIXIU_PREFIX = "kuaixiu/"
@@ -200,3 +201,37 @@ def role_text(r, data):
     if r == "lead":
         return lead_text(auto_mode(data), session_id(data))
     return {"normal": NORMAL_TEXT, "kuaixiu": KUAIXIU_TEXT, "subagent": SUBAGENT_TEXT}.get(r, "")
+
+
+TAIL = 30
+
+
+def tail(text, n=TAIL):
+    return "\n".join(text.rstrip().splitlines()[-n:])
+
+
+def default_branch(cwd):
+    """默认主分支：origin/HEAD 指向的分支，没有就找本地的 main、master。"""
+    head = git(cwd, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    if head:
+        return head[len("origin/"):] if head.startswith("origin/") else head
+    for b in ("main", "master"):
+        if git(cwd, "rev-parse", "--verify", "--quiet", "refs/heads/" + b):
+            return b
+    return None
+
+
+def run_shell(cmd, cwd, timeout):
+    """用 shell 跑命令，返回 (退出码或 None 表示超时, 合并后的输出)。超时会杀掉整个进程组。"""
+    p = subprocess.Popen(cmd, shell=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, errors="replace", start_new_session=True)
+    try:
+        out, _ = p.communicate(timeout=timeout)
+        return p.returncode, out or ""
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        out, _ = p.communicate()
+        return None, out or ""

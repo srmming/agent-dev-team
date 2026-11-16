@@ -9,10 +9,9 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import git, repo_root  # noqa: E402
+from common import git, repo_root, tail  # noqa: E402
 import records  # noqa: E402
 
-TAIL = 30
 # 仓库里没做完的操作：<git 目录>下有这些文件或目录就是还在进行中
 BUSY = (("REVERT_HEAD", "revert"), ("CHERRY_PICK_HEAD", "cherry-pick"), ("MERGE_HEAD", "merge"),
         ("rebase-merge", "rebase"), ("rebase-apply", "rebase 或 am"), ("sequencer", "revert 或 cherry-pick"))
@@ -26,10 +25,6 @@ def run_git(cwd, *args):
     except Exception as e:  # noqa: BLE001
         return 1, str(e)
     return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
-
-
-def tail(text, n=TAIL):
-    return "\n".join(text.splitlines()[-n:])
 
 
 def in_progress(cwd):
@@ -134,8 +129,6 @@ def main(argv=None):
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except SystemExit:
-        raise
     except Exception as e:  # noqa: BLE001  脚本自己出错时给出明确结论，不让负责人当成别的结果
         print('回滚：失败' + "\n脚本自己出错：" + repr(e))
         sys.exit(1)

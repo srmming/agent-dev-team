@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import git, project_config, repo_root  # noqa: E402
+from common import default_branch, git, project_config, repo_root  # noqa: E402
 import records  # noqa: E402
 
 DEFAULT_CMD = "codex exec --sandbox read-only -c model_reasoning_effort=max"
@@ -25,17 +25,6 @@ def verdicts_in(out):
     行里还有别的字（引用提示词、加粗、举例）都不算。"""
     lines = [ln.strip(" \t\r") for ln in out.split("\n")]  # 只按换行切：别的分隔符（换页符等）不算一行的开头结尾
     return [VERDICTS[ln] for ln in lines if ln in VERDICTS]
-
-
-def default_branch(cwd):
-    """默认主分支：origin/HEAD 指向的分支，没有就找本地的 main、master。"""
-    head = git(cwd, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
-    if head:
-        return head[len("origin/"):] if head.startswith("origin/") else head
-    for b in ("main", "master"):
-        if git(cwd, "rev-parse", "--verify", "--quiet", "refs/heads/" + b):
-            return b
-    return None
 
 
 def review_cmd(root):
@@ -153,8 +142,6 @@ def main(argv=None):
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except SystemExit:
-        raise
     except Exception as e:  # noqa: BLE001  脚本自己出错时给出明确结论，不让负责人当成别的结果
         print('审核：出错（不计入失败轮数）' + "\n脚本自己出错：" + repr(e))
         sys.exit(2)

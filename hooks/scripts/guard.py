@@ -691,7 +691,7 @@ def segments(cmd, depth=0):
 
 
 def commands(cmd):
-    """返回命令里每一段的词列表（已剥掉包装器），和有没有写文件的重定向。"""
+    """每一段的词列表（已剥掉包装器），和有没有写文件的重定向。"""
     segs, writes, _ = segments(cmd)
     return [w for w in map(unwrap, segs) if w], writes
 
@@ -918,9 +918,8 @@ def scan_ship(cmd):
         hint = SHIP_HINT.search(cmd) or any(SHIP_HINT.search(w) for seg in segs for w in seg)
         return kinds, bool(unknown and hint)
     except Exception:
-        # 拆不开、守卫自己出错：都算看不懂。这类词在原文里找，也在还原转义、去掉引号之后的样子里找
-        flat = re.sub(r"""['"\\]""", "", _ansi_c(cmd))
-        return set(), bool(SHIP_HINT.search(cmd) or SHIP_HINT.search(flat))
+        # 拆不开、守卫自己出错：都算看不懂
+        return set(), hinted(cmd)
 
 
 def may_ship(cmd):
@@ -1199,7 +1198,7 @@ def push_plan(cwd, args):
     if not base:
         return (f"远端 {remote} 上还没有任何分支（第一次推送），守卫查不出哪些提交是新的，不能放行。"
                 "第一次推送请用户自己运行，或者用户先说「普通对话」。")
-    name = src if src != "HEAD" else (cur if cur not in ("", "HEAD") else "HEAD")
+    name = src if src != "HEAD" else (cur or "HEAD")
     return {"what": "推送", "name": name, "base": base, "review_base": base, "tip": tip, "target": dst,
             "remote": remote}
 
@@ -1236,9 +1235,8 @@ def pr_plan(cwd, args):
     return {"what": "开 PR", "name": head, "base": base_ref, "review_base": base_ref, "tip": tip, "target": None}
 
 
-def clean_merge(cwd, sha):
+def clean_merge(cwd, sha, parents):
     """合并提交的内容是不是两边自动合出来的（没夹带别的改动）。判断不了（章鱼合并、git 太旧）按不是处理。"""
-    parents = (git(cwd, "rev-list", "--parents", "-n", "1", sha, "--") or "").split()[1:]
     if len(parents) != 2:
         return False
     try:
@@ -1253,15 +1251,13 @@ def clean_merge(cwd, sha):
 def uncovered(cwd, rng):
     """范围里还不能上传的提交。git 查不出来时返回 None（调用的地方要拦，不能当成通过）。
 
-    一个审核单元 = 一次通过的审核 = {起点, 顶端}：Codex 看过从起点到顶端这一整段的最终结果。
-    所以它只证明一件事：起点那个状态没问题的话，顶端那个状态也没问题。
-    一个提交的状态算「通过」，有三种情况：
+    审核单元 = 一次通过的审核 = {起点, 顶端}：只证明「起点没问题的话，顶端也没问题」。
+    一个提交算「通过」有三种情况：
       1. 它不在这次上传里（远端 / 当前分支已经有了）；
       2. 它是某个单元的顶端，那个单元的起点也算通过，而且单元这一段的提交都在这次上传里
          （回滚记的单元不要求最后这条）；
       3. 它是两边自动合出来、没夹带改动的合并提交，而且两边都算通过。
-    通过的提交和它前面的提交都可以上传，其余的不行。这样：只带了某个单元的一部分（只推「引入问题」
-    的提交，不推后面「撤销」的提交）不行；单元的起点是个没人审过的中间状态（先审 A→B，再从 A 审到 C）也不行。"""
+    通过的提交和它前面的提交可以上传，其余不行：只带单元的一部分不行，起点是没人审过的中间状态也不行。"""
     out = git(cwd, "rev-list", "--topo-order", "--reverse", "--parents", rng, "--")
     if out is None:
         return None
@@ -1281,7 +1277,7 @@ def uncovered(cwd, rng):
 
     for c in order:
         passed[c] = (any(ok(f) for f in forks.get(c, []))
-                     or len(parents[c]) > 1 and all(ok(p) for p in parents[c]) and clean_merge(cwd, c))
+                     or len(parents[c]) > 1 and all(ok(p) for p in parents[c]) and clean_merge(cwd, c, parents[c]))
     fine = set()
     for c in reversed(order):  # 通过的提交，连同它前面的提交，都可以上传
         if passed[c] or c in fine:
@@ -1316,7 +1312,8 @@ def check_upload(cwd, cmd, kinds, semi, codex_off):
     words = strict_words(cmd)
     if words is None:
         return UPLOAD_FORM
-    kind = gh_ship(no_rtk(words)) if no_rtk(words)[:1] == ["gh"] else None
+    plain = no_rtk(words)
+    kind = gh_ship(plain) if plain[:1] == ["gh"] else None
     if kind in ("pr-merge", "api") or kinds & {"pr-merge", "api"}:
         if semi:
             return SEMI_PR
@@ -1427,9 +1424,10 @@ def main():
         sys.exit(0)
     if not isinstance(data, dict) or os.environ.get("AGENT_DEV_TEAM", "").lower() == "off":
         sys.exit(0)
-    inp = data.get("tool_input")
-    cmd = inp.get("command") if isinstance(inp, dict) else None
-    if data.get("tool_name") == "Bash" and isinstance(cmd, str):
+    tool = data.get("tool_name", "")
+    inp = data.get("tool_input") or {}
+    cmd = inp.get("command", "") if isinstance(inp, dict) else None
+    if tool == "Bash" and isinstance(cmd, str):
         WATCH["cmd"] = cmd  # 在认角色之前登记
     if hasattr(signal, "SIGALRM"):
         try:
@@ -1441,12 +1439,9 @@ def main():
     r = role(data)
     if r in ("none", "normal"):
         sys.exit(0)
-    tool = data.get("tool_name", "")
-    inp = data.get("tool_input") or {}
     cwd = data.get("cwd") or os.getcwd()
 
     if tool == "Bash":
-        cmd = inp.get("command", "") or ""
         if not isinstance(cmd, str):
             sys.exit(0)
         if r in NO_SHIP:
