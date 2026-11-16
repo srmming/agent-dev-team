@@ -1,0 +1,29 @@
+// 状态栏画图要读的值，放在 $.state 里：值一变，输入框上方那一行就重画；reload 后不丢。
+//
+// view：从对话状态文件读出来的那份（null = 还没读过）
+//   off    主插件整个关掉了（AGENT_DEV_TEAM=off 或项目根有 .claude/agent-dev-team-off）
+//   role   lead / normal / subagent / kuaixiu
+//   auto   full / semi
+//   status 状态文件里的 status 键（没有为 null）
+//   tokens 状态文件里的 tokens 键，转成文字（没有为 null）
+// agents：在跑的子代理，id 和显示的名字
+// expanded：详情是否展开
+export type StatusView = {
+  off: boolean
+  role: string
+  auto: string
+  status: string | null
+  tokens: string | null
+}
+
+export type RunningAgent = { id: string; label: string }
+
+declare module 'claude-code' {
+  interface PluginState {
+    'agent-dev-team-status': {
+      view: StatusView | null
+      agents: RunningAgent[]
+      expanded: boolean
+    }
+  }
+}
