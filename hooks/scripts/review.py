@@ -20,7 +20,7 @@ import records  # noqa: E402
 DEFAULT_CMD = "codex exec --sandbox read-only -c model_reasoning_effort=max"
 TIMEOUT = 1800
 MAX_LINES = 60
-ISSUES_MAX = 20000  # 上一轮的问题清单放进提示词时最多这么多字（只留最后这些）
+ISSUES_MAX = 20000  # 上一轮的问题清单超过这么多字就不做增量复审（不截断，免得开头的问题丢掉），改全量
 VERDICTS = {"VERDICT: PASS": "PASS", "VERDICT: FAIL": "FAIL"}
 
 
@@ -61,8 +61,6 @@ def prompt_for(rng):
 
 def prompt_incr(prev, tip, issues):
     """增量复审：上一轮审到 prev 没通过，之后加了修复到 tip。"""
-    if len(issues) > ISSUES_MAX:
-        issues = "（前面省略）\n" + issues[-ISSUES_MAX:]
     return (
         "你是代码审核员，只审核，不修改任何文件。\n"
         f"这是复审。这个分支上一轮审到 {prev}，没通过，问题清单在最后。之后分支上加了修复，现在到了 {tip}。"
@@ -152,6 +150,8 @@ def main(argv=None):
             why = "起点变了：rebase 过，或者基准换了"
         elif git(cwd, "merge-base", "--is-ancestor", last["tip"], branch_sha) is None:
             why = "上一轮审到的提交不在这个分支现在的历史里"
+        elif len(last["issues"]) > ISSUES_MAX:
+            why = f"上一轮的问题清单太长（{len(last['issues'])} 字，超过 {ISSUES_MAX}），不截断"
         else:
             prev = last
     if prev:
@@ -197,7 +197,8 @@ def main(argv=None):
         return 0
 
     n = records.add_fail(cwd, a.branch)
-    records.save_last(cwd, a.branch, fork, branch_sha, out)  # 下一轮只复审增量用
+    if verdicts:  # 拿到有效的 VERDICT: FAIL 才用这一轮覆盖记录（下一轮只复审增量用）；没有结论时原记录一字不动
+        records.save_last(cwd, a.branch, fork, branch_sha, out)
     print(f"审核：不通过（第 {n} 轮）" + ("\n" + note if note else ""))
     if n >= 2:
         print(f"同一任务已 {n} 轮不过：负责人先自己读一次 diff，再决定重派还是挂起。")

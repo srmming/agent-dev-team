@@ -59,15 +59,17 @@ def main():
     changes, note = decide(prompt, data)
     if changes:
         save_session(session_id(data), **changes)
-    r = role(data)
+    r, told = role(data), load_told(session_id(data))
     if not changes:
-        told = load_told(session_id(data))
         if told == told_key(r, data):
             return  # 模型已经知道：什么都不加
         if told is None:  # 没记过（会话开始的提示是旧版给的）：当作已经知道，记下来就行
             save_told(data, r)
             return
         note = CHANGED + role_text(r, data)
+    elif "role" not in changes and told is not None and told.split("/")[0] != r:
+        # 全自动 / 半自动口令只回应口令本身；角色在别处（状态栏）变了的话，角色提示要一起给
+        note = CHANGED + role_text(r, data) + "\n" + note
     save_told(data, r)
     print(json.dumps(
         {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": note}},

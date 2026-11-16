@@ -506,6 +506,40 @@ print("VERDICT: PASS")
             self.assertTrue(out.startswith("审核：出错（不计入失败轮数）"), out)
         self.assertEqual(records.fails(self.repo, "feat"), 0)
 
+    def test_没有有效结论不覆盖上一轮记录_连续重试还是审第一次的范围(self):
+        tip1 = sh(self.repo, "rev-parse", "feat")
+        fail, _ = self.logged("f1", "严重：第一次发现的问题\nVERDICT: FAIL\n")
+        self.rv(fail)
+        before = records.load_last(self.repo, "feat")
+        tip2 = self.feat_commit("v3\n")
+        for i, output in enumerate(("", "我看完了，没写结论\n", "**VERDICT: PASS**\n")):  # 空输出、没有结论行
+            cmd, _ = self.logged(f"empty{i}", output)
+            code, out = self.rv(cmd)
+            self.assertIn("没有给出结论", out)
+            self.assertEqual(records.load_last(self.repo, "feat"), before)  # 原记录一字不动
+        cmd, prompt = self.logged("third", "VERDICT: PASS\n")
+        code, out = self.rv(cmd)
+        self.assertEqual(code, 0, out)
+        text = prompt()
+        self.assertIn("严重：第一次发现的问题", text)
+        self.assertIn(f"git diff {tip1}..{tip2}", text)
+
+    def test_上一轮问题清单太长_不截断_退回全量(self):
+        main, tip = sh(self.repo, "rev-parse", "main"), sh(self.repo, "rev-parse", "feat")
+        records.save_last(self.repo, "feat", main, tip, "严重：开头的问题\n" + "x" * 30000)
+        cmd, prompt = self.logged("long", "VERDICT: FAIL\n")
+        code, out = self.rv(cmd)
+        self.assertNotIn("这是复审", prompt())
+        self.assertIn(f"git diff {main}..{tip}", prompt())
+        self.assertIn("问题清单太长", out)
+        # --last-issues 给的文件太长也一样
+        issues = os.path.join(self.tmp.name, "long.txt")
+        with open(issues, "w", encoding="utf-8") as f:
+            f.write("y" * 30000)
+        code, out = self.rv(cmd, "--since", tip, "--last-issues", issues)
+        self.assertNotIn("这是复审", prompt())
+        self.assertIn("问题清单太长", out)
+
 
 class DeployCheckCmd(RepoCase):
     def config(self, cmd, retries=2):

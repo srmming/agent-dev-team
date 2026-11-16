@@ -340,6 +340,24 @@ class PromptSubmitTest(Base):
         self.context(self.submit("【派活单】修个 bug"))
         self.assertEqual(self.submit("继续"), "")
 
+    def test_按钮切了角色_下一条正好是全自动半自动口令_角色提示一起给(self):
+        self.cwd = self.make_repo()
+        self.session_start()                                   # 告诉过：负责人
+        self.set_state("s1", role="normal")                    # 状态栏按钮切到普通对话
+        ctx = self.context(self.submit("半自动"))
+        self.assertIn(common.NORMAL_TEXT, ctx)
+        self.assertIn("模式已切换成「半自动」", ctx)
+        self.assertEqual(self.submit("继续"), "")
+        self.set_state("s1", role="lead", auto="semi")         # 按钮切回负责人
+        ctx = self.context(self.submit("全自动"))
+        self.assertIn("这个对话是「负责人模式」", ctx)
+        self.assertIn("当前是「全自动」", ctx)
+        self.assertIn("模式已切换成「全自动」", ctx)
+        self.assertEqual(self.submit("继续"), "")
+        # 角色没变时口令照旧，不多给角色提示
+        ctx = self.context(self.submit("半自动"))
+        self.assertNotIn("这个对话的模式变了", ctx)
+
 
 class ModeCliTest(Base):
     def mode(self, *args):
