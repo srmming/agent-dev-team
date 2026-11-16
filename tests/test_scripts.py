@@ -674,7 +674,7 @@ class DeployCheckGitHub(RepoCase):
         runs = {"total_count": 2, "check_runs": [
             {"id": 2, "name": "ci", "status": "completed", "conclusion": "success", "started_at": "2026-11-16T10:05:00Z"},
             {"id": 1, "name": "ci", "status": "completed", "conclusion": "failure", "started_at": "2026-11-16T10:00:00Z"}]}
-        self.fake_by_id(runs, [], {})
+        self.fake_by_id(runs, [{"id": 7, "environment": "production"}], {7: [{"state": "success"}]})
         code, out = self.d()
         self.assertEqual(code, 0, out)
 
@@ -687,13 +687,15 @@ class DeployCheckGitHub(RepoCase):
                 [run(1, gha, 100, "failure", 0), run(2, circle, 200, "success", 5)],   # 两个 CI 都叫 build
                 [run(1, gha, 100, "failure", 0), run(2, gha, 101, "success", 5)],      # 同一个 CI 的两个工作流
                 [run(1, {"slug": "a"}, None, "failure", 0), run(2, {"slug": "b"}, None, "success", 5)]):  # 只有 slug
-            self.fake_by_id({"total_count": 2, "check_runs": runs}, [], {})
+            self.fake_by_id({"total_count": 2, "check_runs": runs}, [{"id": 7, "environment": "production"}],
+                            {7: [{"state": "success"}]})
             code, out = self.d()
             self.assertEqual(code, 1, out)
             self.assertIn("检查 build：failure", out)
         # 同一来源、同一个工作流里重跑：只看最新一次
         self.fake_by_id({"total_count": 2, "check_runs": [run(1, gha, 100, "failure", 0),
-                                                          run(2, gha, 100, "success", 5)]}, [], {})
+                                                          run(2, gha, 100, "success", 5)]},
+                        [{"id": 7, "environment": "production"}], {7: [{"state": "success"}]})
         code, out = self.d()
         self.assertEqual(code, 0, out)
 
@@ -755,11 +757,12 @@ class DeployCheckGitHub(RepoCase):
     def test_提交状态成功_通过_只有提交状态也行(self):
         self.fake_api({"total_count": 0, "check_runs": []}, [], [], self.status(("ci/build", "success")))
         code, out = self.d()
-        self.assertEqual(code, 0, out)
-        self.assertEqual(out.splitlines()[0], "上线检查：通过")
+        # 0.2.2 起没有部署记录就无法判断：只有提交状态、检查成功，都不能说明部署成功
+        self.assertEqual(code, 3, out)
+        self.assertEqual(out.splitlines()[0], "上线检查：无法判断")
         # 一条提交状态都没有（接口返回 pending、空列表）不算在等：照 check runs 的结果来
         self.fake_api(self.OK_RUNS, [], [], self.NO_STATUS)
-        self.assertEqual(self.d()[0], 0)
+        self.assertEqual(self.d()[0], 3)
 
     def test_提交状态还在等_按等待处理_超时无法判断(self):
         self.fake_api(self.OK_RUNS, [], [], self.status(("ci/build", "success"), ("ci/deploy", "pending")))
@@ -776,6 +779,8 @@ class DeployCheckGitHub(RepoCase):
                 return self.OK_RUNS
             if "/status" in path and "/deployments" not in path:
                 return answers.pop(0) if len(answers) > 1 else answers[0]
+            if "/deployments" in path:  # 补一条部署成功的记录，这条测的是等待逻辑
+                return [{"state": "success"}] if "/statuses" in path else [{"id": 7, "environment": "production"}]
             return []
         deploy_check.gh_api = api
         buf = io.StringIO()
