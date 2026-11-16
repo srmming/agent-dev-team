@@ -3,11 +3,12 @@
 审核的是从基准到分支顶端这一整段的最终结果，所以通过只证明「整段一起上」没问题。
 上一轮没通过、之后分支上只是加了提交（起点没变）时，只复审增量：确认上一轮的问题修好了，
 再审上一轮以来的改动。增量通过 = 前面全量审过、问题都修了、这次的改动没有新的严重问题，
-记的审核单元和全量通过一样（起点到顶端整段）。--full 强制全量。
+记的审核单元和全量通过一样（起点到顶端整段）。--full 强制全量。上一轮的任务说明（--brief）和这一轮不同，也改做全量。
 Codex 要在分支顶端那份代码里跑才能读对文件：--cwd 正好在顶端就在那里跑；不在顶端时，
 换到检出了这个分支的工作副本；哪里都没检出，就建一个临时工作副本。要用的那份有没提交的改动就出错。
 完整报告存进状态目录，输出里列全部严重问题和最多 10 条一般问题。
-同一段改动（分叉点、顶端、提示词版本、审核命令、任务说明都一样）用 Codex 审过，就复用之前的结论。
+同一次审核（分叉点、顶端、提示词版本、审核命令、任务说明、全量还是增量、实际审的范围都一样）用 Codex 审过，
+就复用之前的结论。完整报告的文件名带时间和缓存键，不同的审核不会写到同一个文件。
 --plan 不审分支：让 Codex 只读地评一个做法，第一行「设计：可以做 / 建议换做法」，不写审核记录。
 输出第一行是结论。退出码：通过或没有改动 0，不通过 1，
 出错（不是仓库、找不到分支、找不到审核命令、超时）2，出错不计入失败轮数。
@@ -57,6 +58,15 @@ SCHEMA = {
                 "detail": {"type": "string"}, "root_cause": {"type": "string"}}}},
     },
 }
+
+# 复审多一个 previous：逐条确认上一轮的问题。issues 只放还没解决的问题
+STATUSES = ("已修好", "没修好")
+SCHEMA_INCR = dict(SCHEMA, required=SCHEMA["required"] + ["previous"], properties=dict(SCHEMA["properties"], previous={
+    "type": "array", "items": {
+        "type": "object", "additionalProperties": False, "required": ["title", "severity", "status", "detail"],
+        "properties": {
+            "title": {"type": "string"}, "severity": {"type": "string", "enum": list(LEVELS)},
+            "status": {"type": "string", "enum": list(STATUSES)}, "detail": {"type": "string"}}}}))
 
 
 def verdicts_in(out):
@@ -109,6 +119,18 @@ STRUCTURED = (
     "summary 写一两句总评。"
 )
 
+STRUCTURED_INCR = (
+    "\n复审的约定：上一轮问题的确认写在 previous 里，每条写标题、上一轮标的严重程度、已修好或没修好、说明；"
+    "issues 只写还没解决的问题：这次新发现的问题照常写，上一轮没修好的写在 previous 里就够了，"
+    "已修好的问题不要写进 issues。上一轮的严重问题在 previous 里标「没修好」，或者 issues 里有严重问题，就是 FAIL。"
+)
+
+TEXT_INCR = (
+    "\n复审的约定：先单独写一节「上一轮问题确认」，逐条写上一轮的问题：标题、上一轮标的严重程度、已修好或没修好、说明。"
+    "再按严重 / 一般 / 建议列还没解决的问题：这次新发现的问题照常列，上一轮没修好的写在确认那一节就够了，"
+    "已修好的问题不要再列进严重 / 一般 / 建议。上一轮的严重问题没修好，或者有新的严重问题，结论就是 FAIL。"
+)
+
 
 def brief_text(brief):
     if not brief:
@@ -137,8 +159,9 @@ def prompt_incr(prev, tip, issues, brief=None, structured=False):
         "上一轮的严重问题没修好，也算有严重问题。\n"
         "复审只因为两种问题不通过：上一轮的问题没修好；这次新改的代码"
         f"（{prev}..{tip} 的改动）里的严重问题。"
-        "上一轮已经审过、这次没动的代码里新挑出来的问题，一律算「一般」，照样列出来，但不挡合并。\n"
-        + STANDARD + (STRUCTURED if structured else "") + brief_text(brief)
+        "上一轮已经审过、这次没动的代码里新挑出来的问题，一律算「一般」，照样列出来，但不挡合并。"
+        "上一轮的一般 / 建议问题没修好，照样写「没修好」，但不挡合并。\n"
+        + STANDARD + (STRUCTURED + STRUCTURED_INCR if structured else TEXT_INCR) + brief_text(brief)
         + "\n\n上一轮的问题清单：\n" + issues
     )
 
@@ -269,7 +292,8 @@ def log_usage(cwd, u, branch, rnd, tip, effort):
 # ---------- 结论和问题清单 ----------
 
 def structured(text):
-    """按 SCHEMA 给的 JSON 结论。不是这个结构返回 None（改按文字解析）。有严重问题一律算不通过。"""
+    """按 SCHEMA（复审是 SCHEMA_INCR）给的 JSON 结论。不是这个结构返回 None（改按文字解析）。
+    issues 里有严重问题，或者 previous 里上一轮的严重问题没修好，一律算不通过；previous 里「已修好」的不算问题。"""
     t = text.strip()
     if t.startswith("```"):
         t = re.sub(r"^```[a-zA-Z]*\n|\n?```$", "", t)
@@ -285,8 +309,33 @@ def structured(text):
             issues.append({"severity": i.get("severity") if i.get("severity") in LEVELS else "一般",
                            **{k: "" if i.get(k) is None else str(i.get(k))
                               for k in ("title", "file", "line", "detail", "root_cause")}})
-    verdict = "FAIL" if any(i["severity"] == "严重" for i in issues) else d["verdict"]
-    return {"verdict": verdict, "summary": str(d.get("summary") or ""), "issues": issues}
+    previous = []
+    for i in d.get("previous") if isinstance(d.get("previous"), list) else []:
+        if isinstance(i, dict):
+            # 认不出的严重程度按严重、认不出的状态按没修好：拿不准就挡
+            previous.append({"severity": i.get("severity") if i.get("severity") in LEVELS else "严重",
+                             "status": i.get("status") if i.get("status") in STATUSES else "没修好",
+                             **{k: "" if i.get(k) is None else str(i.get(k)) for k in ("title", "detail")}})
+    blocked = any(i["severity"] == "严重" for i in issues) \
+        or any(p["status"] == "没修好" and p["severity"] == "严重" for p in previous)
+    verdict = "FAIL" if blocked else d["verdict"]
+    return {"verdict": verdict, "summary": str(d.get("summary") or ""), "issues": issues, "previous": previous}
+
+
+def previous_lines(previous, short):
+    """上一轮问题确认这一节。short：只列没修好的，已修好的只给条数（交给负责人看的那份）。"""
+    items = [p for p in previous if not short or p["status"] == "没修好"]
+    done = sum(p["status"] == "已修好" for p in previous) if short else 0
+    if not items and not done:
+        return []
+    lines = ["", "上一轮问题确认："]
+    for n, p in enumerate(items, 1):
+        lines.append(f"{n}. 【{p['status']}】{p['title']}（上一轮：{p['severity']}）")
+        if p["detail"]:
+            lines.append("   说明：" + p["detail"])
+    if done:
+        lines.append(f"已修好 {done} 条，见完整报告。")
+    return lines
 
 
 def issue_lines(n, i):
@@ -302,6 +351,7 @@ def issue_lines(n, i):
 def render(d, general_max=None):
     """JSON 结论转成文字。严重问题全列；general_max：一般和建议一共最多列几条（None 不限，存完整报告用）。"""
     lines = [d["summary"]] if d["summary"] else []
+    lines += previous_lines(d.get("previous") or [], general_max is not None)
     listed, hidden = 0, 0
     for level in LEVELS:
         items = [i for i in d["issues"] if i["severity"] == level]
@@ -322,10 +372,12 @@ def render(d, general_max=None):
 
 LEVEL_RE = re.compile(r"^[\s#>*+\-\d.、()（）【\[]*(严重|一般|建议)(.*)$")
 ITEM_RE = re.compile(r"^\s*([-*+]|\d+[.、)）])\s*")
+CONFIRM_RE = re.compile(r"^[\s#>*]*上一轮问题确认[\s:：*#]*$")  # 复审的「上一轮问题确认」小节标题
 
 
 def pick_text(out):
-    """文字报告交给负责人的部分：不长就整份；长了就留「严重」小节的全部内容和最多 10 条一般 / 建议问题。"""
+    """文字报告交给负责人的部分：不长就整份；长了就留「上一轮问题确认」和「严重」小节的全部内容，
+    和最多 10 条一般 / 建议问题。确认那一节里的条目以「严重」「一般」开头也不算换了小节，只有小节标题才算。"""
     lines = out.strip().splitlines()
     if len(lines) <= MAX_LINES:
         return "\n".join(lines)
@@ -334,11 +386,15 @@ def pick_text(out):
         if ln.strip(" \t\r") in VERDICTS:
             keep.append(ln)
             continue
+        if CONFIRM_RE.match(ln):
+            level = "确认"
+            keep.append(ln)
+            continue
         m = LEVEL_RE.match(ln)
         heading = bool(m) and not m.group(2).strip(" :：*#）)】]（(问题条0123456789")
-        if m:
+        if m and (heading or level != "确认"):
             level = m.group(1)
-        if level == "严重":
+        if level in ("严重", "确认"):
             keep.append(ln)
         elif level in ("一般", "建议"):
             if not heading and (m or ITEM_RE.match(ln)):  # 新的一条
@@ -513,7 +569,7 @@ def main(argv=None):
         if not since:
             print(f"{ERR}\n找不到提交 {a.since}")
             return 2
-        last = {"fork": fork, "tip": since, "issues": issues}
+        last = {"fork": fork, "tip": since, "issues": issues, "brief": records.brief_hash(a.brief)}  # 手动给的，不比说明
     elif not a.full:
         last = records.load_last(cwd, a.branch)
     if last:
@@ -521,6 +577,9 @@ def main(argv=None):
             why = "起点变了：rebase 过，或者基准换了"
         elif git(cwd, "merge-base", "--is-ancestor", last["tip"], branch_sha) is None:
             why = "上一轮审到的提交不在这个分支现在的历史里"
+        elif last.get("brief") != records.brief_hash(a.brief):
+            # 新的完成标准可能涉及上一轮没挡的代码，增量复审会把它们降成一般；旧记录没存说明的，也当变了
+            why = "任务说明变了（或上一轮的记录没存任务说明）"
         elif len(last["issues"]) > ISSUES_MAX:
             why = f"上一轮的问题清单太长（{len(last['issues'])} 字，超过 {ISSUES_MAX}），不截断"
         else:
@@ -534,13 +593,23 @@ def main(argv=None):
     if prev:
         prompt = prompt_incr(prev["tip"], branch_sha, prev["issues"], a.brief, use_json)
         note, effort = f"增量复审：确认上一轮的问题，审了 {prev['tip'][:12]}..{branch_sha[:12]}", EFFORT_INCR
+        mode, scope, schema = "incr", [f"{prev['tip']}..{branch_sha}", prev["issues"]], SCHEMA_INCR
     else:
         prompt = prompt_for(rng, a.brief, use_json)
         note, effort = (f"上一轮的记录用不上（{why}），这次全量审。" if why else ""), EFFORT_FULL
+        mode, scope, schema = "full", [rng], SCHEMA
 
-    # 同一段改动审过就复用。只复用 codex exec 按固定结构给的结论（别的命令每次照跑）
-    key = hashlib.sha256(json.dumps([fork, branch_sha, PROMPT_VERSION, cmd_text, a.brief or ""]).encode()).hexdigest()
+    # 同一次审核做过就复用：键绑定这次审核的全部条件，全量和增量、增量审的范围和上一轮的清单都算在内。
+    # 所以增量通过之后再用 --full，键不一样，会真的跑一次全量。只复用 codex exec 按固定结构给的结论（别的命令每次照跑）
+    key = hashlib.sha256(json.dumps([fork, branch_sha, PROMPT_VERSION, cmd_text, a.brief or "", mode, *scope],
+                                    ensure_ascii=False).encode("utf-8", "surrogatepass")).hexdigest()
     old = records.load_review(cwd, key) if use_json else None
+    if use_json and not old and prev and prev["tip"] == branch_sha and isinstance(prev.get("key"), str):
+        # 上一轮没通过之后没加提交：这次要做的就是上一轮那次审核（起点、顶端、任务说明都已经比过），
+        # 审核命令和提示词版本也没变才复用
+        cand = records.load_review(cwd, prev["key"])
+        if cand and cand.get("cmd") == cmd_text and cand.get("version") == PROMPT_VERSION:
+            old = cand
     if old:
         report = f"\n完整报告：{old['report']}" if old.get("report") else ""
         if old["verdict"] == "PASS":
@@ -560,7 +629,7 @@ def main(argv=None):
         print(f"{ERR}\n{why_place}")
         return 2
     try:
-        text, usage = run_codex(cmd_text, effort, prompt, place, SCHEMA if use_json else None)
+        text, usage = run_codex(cmd_text, effort, prompt, place, schema if use_json else None)
     except CodexError as e:
         print(f"{ERR}\n{e}")
         return 2
@@ -575,13 +644,12 @@ def main(argv=None):
     else:
         verdicts = verdicts_in(text)  # 取最后一个整行结论
         verdict, full, shown = (verdicts[-1] if verdicts else None), text, pick_text(text)
-    report = records.report_path(cwd, a.branch, rnd)
-    if report:
-        with open(report, "w", encoding="utf-8") as f:
-            f.write(f"# 审核 {a.branch} 第 {rnd} 轮（{rng}）\n\n{full}\n")
+    kind = "复审" if prev else "全量"
+    report = records.write_report(cwd, a.branch, rnd, key, f"# 审核 {a.branch} 第 {rnd} 轮 {kind}（{rng}）\n\n{full}\n")
     if verdict and use_json:
         records.save_review(cwd, key, {"verdict": verdict, "report": report, "shown": shown, "fork": fork,
-                                       "tip": branch_sha, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+                                       "tip": branch_sha, "cmd": cmd_text, "version": PROMPT_VERSION,
+                                       "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
     where = f"完整报告：{report}" if report else ""
 
     if verdict == "PASS":
@@ -594,7 +662,7 @@ def main(argv=None):
 
     n = records.add_fail(cwd, a.branch)
     if verdict:  # 拿到有效的 VERDICT: FAIL 才用这一轮覆盖记录（下一轮只复审增量用）；没有结论时原记录一字不动
-        records.save_last(cwd, a.branch, fork, branch_sha, full)
+        records.save_last(cwd, a.branch, fork, branch_sha, full, a.brief, key)
     print("\n".join(x for x in (f"审核：不通过（第 {n} 轮）", note, where) if x))
     log_usage(cwd, usage, a.branch, n, branch_sha, effort)
     if n >= 2:
