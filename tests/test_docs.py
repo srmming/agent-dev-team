@@ -55,8 +55,15 @@ class Docs(unittest.TestCase):
             lines = read("skills", name, "SKILL.md").splitlines()
             self.assertLessEqual(len(lines), n, name)
 
-    def test_四个子代理的守则和RULES一致(self):
-        rules = read("agents", "RULES.md")
+    def test_agents目录里只有四个子代理_每个都有frontmatter(self):
+        names = sorted(os.listdir(os.path.join(ROOT, "agents")))
+        self.assertEqual(names, ["dev-fable.md", "dev-haiku.md", "dev-opus.md", "dev-sonnet.md"])
+        for n in names:
+            self.assertTrue(read("agents", n).startswith("---\n"), n)
+
+    def test_四个子代理的守则和守则文件一致(self):
+        self.assertEqual(common.RULES_FILE, os.path.join(ROOT, "hooks", "rules", "subagent.md"))
+        rules = read("hooks", "rules", "subagent.md")
         block = rules[rules.index("你是负责人派出的开发子代理"):].strip()
         self.assertIn("20 行以内", block)
         self.assertIn("git rebase", block)

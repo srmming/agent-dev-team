@@ -22,18 +22,32 @@ type Raw = Record<string, unknown>
 
 // ---------- 文件位置 ----------
 
+// 和主插件 common.state_home 一样：AGENT_DEV_TEAM_HOME 非空就用它，否则 ~/.claude/agent-dev-team
 async function stateDir($: $): Promise<string> {
   const custom = (await $.env.get('AGENT_DEV_TEAM_HOME')) ?? ''
-  if (custom.trim() !== '') return custom.replace(/\/+$/, '')
+  if (custom !== '') return custom.length > 1 ? custom.replace(/\/+$/, '') : custom
   const home = (await $.env.get('HOME')) ?? ''
   return `${home}/.claude/agent-dev-team`
 }
 
-// 当前对话的状态文件；session id 不像个文件名时返回 undefined（不读也不写）
-async function sessionFile($: $): Promise<string | undefined> {
-  const id = await $.session.id()
-  if (id === '' || id.includes('/') || id.includes('..')) return undefined
-  return `${await stateDir($)}/sessions/${id}.json`
+// 和主插件 common.session_path 一样：文件名里只留 A-Z a-z 0-9 _ . -，别的字符换成 _，空的叫 unknown
+function sessionName(id: string): string {
+  return id.replace(/[^A-Za-z0-9_.-]/g, '_') || 'unknown'
+}
+
+// 当前对话的状态文件
+async function sessionFile($: $): Promise<string> {
+  return `${await stateDir($)}/sessions/${sessionName(await $.session.id())}.json`
+}
+
+// 兼容旧做法：状态文件里没有角色、当前分支以 kuaixiu/ 开头时是对接窗口（和主插件一样）
+async function onKuaixiuBranch($: $, cwd: string): Promise<boolean> {
+  try {
+    const r = await $.process.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], { cwd, timeoutMs: 3000 })
+    return r.exitCode === 0 && r.stdout.trim().startsWith('kuaixiu/')
+  } catch {
+    return false
+  }
 }
 
 // 项目根：git 仓库根；不在仓库里就是当前目录（和主插件同一个说法）
@@ -66,21 +80,22 @@ function tokensText(v: unknown): string | null {
 
 async function loadView($: $): Promise<StatusView> {
   const root = await projectRoot($)
-  let off = ((await $.env.get('AGENT_DEV_TEAM')) ?? '').trim().toLowerCase() === 'off'
+  // 和主插件 common.guard_off 一样：AGENT_DEV_TEAM 是 off（不分大小写），或项目根有关闭文件
+  let off = ((await $.env.get('AGENT_DEV_TEAM')) ?? '').toLowerCase() === 'off'
   if (!off) {
     try {
       off = await $.fs.exists(`${root}/.claude/agent-dev-team-off`)
     } catch {}
   }
-  const file = await sessionFile($)
-  const data = file === undefined ? {} : await readJson($, file)
+  const data = await readJson($, await sessionFile($))
   // auto 的默认：项目配置的 default_auto，没有就是 full
   let auto = typeof data.auto === 'string' && AUTOS.includes(data.auto) ? data.auto : undefined
   if (auto === undefined) {
     const cfg = await readJson($, `${root}/.claude/agent-dev-team.json`)
     auto = typeof cfg.default_auto === 'string' && AUTOS.includes(cfg.default_auto) ? cfg.default_auto : 'full'
   }
-  const role = typeof data.role === 'string' && ROLES.includes(data.role) ? data.role : 'lead'
+  let role = typeof data.role === 'string' && ROLES.includes(data.role) ? data.role : undefined
+  if (role === undefined) role = (await onKuaixiuBranch($, await $.session.cwd())) ? 'kuaixiu' : 'lead'
   const status = typeof data.status === 'string' && data.status.trim() !== '' ? data.status.trim() : null
   return { off, role, auto, status, tokens: tokensText(data.tokens) }
 }
@@ -114,7 +129,6 @@ async function refresh($: $, include?: RunningAgent, exclude?: string): Promise<
 // 只改给出的键，其余键（status、tokens……）原样保留
 async function writeMode($: $, patch: { role?: string; auto?: string }): Promise<void> {
   const file = await sessionFile($)
-  if (file === undefined) return
   const data = { ...(await readJson($, file)), ...patch }
   await $.fs.write(file, JSON.stringify(data, null, 2) + '\n')
   await refresh($)

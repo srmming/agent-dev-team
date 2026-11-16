@@ -10,6 +10,7 @@ AUTOS = ("full", "semi")
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(SCRIPTS_DIR))
+RULES_FILE = os.path.join(PLUGIN_ROOT, "hooks", "rules", "subagent.md")
 
 
 def git(cwd, *args):
@@ -178,9 +179,10 @@ def lead_text(auto, sid):
 
 
 def rules_text():
-    """子代理守则全文（agents/RULES.md）。读不到就用简短版。"""
+    """子代理守则全文（hooks/rules/subagent.md）。读不到就用简短版。
+    不放在 agents/ 下：那里的 .md 会被插件当成子代理。"""
     try:
-        with open(os.path.join(PLUGIN_ROOT, "agents", "RULES.md"), encoding="utf-8") as f:
+        with open(RULES_FILE, encoding="utf-8") as f:
             return f.read().strip()
     except Exception:
         return SUBAGENT_TEXT

@@ -221,7 +221,7 @@ class PromptSubmitTest(Base):
         ctx = self.context(self.submit("【派活单】A1：守卫改黑名单\n\n## 1. 目标\n……"))
         self.assertEqual(self.state("s1")["role"], "subagent")
         self.assertIn("这个窗口是子代理，忽略之前的负责人提示", ctx)
-        with open(os.path.join(PLUGIN, "agents", "RULES.md"), encoding="utf-8") as f:
+        with open(os.path.join(PLUGIN, "hooks", "rules", "subagent.md"), encoding="utf-8") as f:
             rules = f.read().strip()
         self.assertIn(rules, ctx)
         self.assertIn("20 行以内", rules)

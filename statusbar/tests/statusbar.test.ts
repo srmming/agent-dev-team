@@ -21,20 +21,27 @@ type Env = {
   agents?: AgentRow[]
   env?: Record<string, string>
   offFile?: boolean
+  sid?: string
+  branch?: string
 }
 
 const setup = (on: any, o: Env = {}) => {
   const files = new Map<string, string>()
   if (o.file !== undefined) files.set(FILE, JSON.stringify(o.file))
+  const sid = o.sid ?? SID
+  const branch = o.branch ?? 'main'
   if (o.offFile) files.set(`${ROOT}/.claude/agent-dev-team-off`, '')
   const env: Record<string, string> = { AGENT_DEV_TEAM_HOME: HOME_DIR, HOME: '/real-home', ...(o.env ?? {}) }
   const writes: string[] = []
   const agents = o.agents ?? []
 
-  on('session.id', () => ({ value: SID }))
+  on('session.id', () => ({ value: sid }))
   on('session.cwd', () => ({ value: ROOT }))
   on('env.get', (_: unknown, e: { name: string }) => ({ value: env[e.name] }))
-  on('process.run', () => ({ value: { exitCode: 0, stdout: ROOT + '\n', stderr: '' } }))
+  // git rev-parse --show-toplevel 回答仓库根；--abbrev-ref HEAD 回答当前分支
+  on('process.run', (_: unknown, e: { argv: readonly string[] }) => ({
+    value: { exitCode: 0, stdout: (e.argv.includes('--abbrev-ref') ? branch : ROOT) + '\n', stderr: '' },
+  }))
   on('fs.exists', (_: unknown, e: { path: string }) => ({ value: files.has(e.path) }))
   on('fs.read', (_: unknown, e: { path: string }) => {
     const text = files.get(e.path)
@@ -55,6 +62,7 @@ const setup = (on: any, o: Env = {}) => {
   return {
     agents,
     writes,
+    files,
     saved: () => JSON.parse(files.get(FILE) ?? '{}') as Record<string, unknown>,
     // 模拟别的进程（主插件钩子 / 命令行）改了状态文件
     setFile: (data: Record<string, unknown>) => files.set(FILE, JSON.stringify(data)),
@@ -350,6 +358,42 @@ test('别的进程改了状态文件，每轮结束后显示跟上', async ($, o
   const ui2 = await mount($, 'desktop')
   expect((await look(ui2)).all).toBe('对接窗口 · 只做小改动，不能 push')
   await ui2.unmount()
+})
+
+test('和主插件一样：session id 里的怪字符换成 _，写到同一个文件', async ($, on) => {
+  const s = setup(on, { sid: '../a b:c' })
+  await start($)
+  const ui = await mount($, 'desktop')
+  await ui.press({ key: 'role-normal' })
+  const name = `${HOME_DIR}/sessions/.._a_b_c.json`
+  expect(s.writes).toEqual([name])
+  expect(JSON.parse(s.files.get(name) ?? '{}')).toEqual({ role: 'normal' })
+  await ui.unmount()
+})
+
+test('和主插件一样：状态文件没写角色、分支是 kuaixiu/ 开头时是对接窗口', async ($, on) => {
+  setup(on, { branch: 'kuaixiu/fix', file: { auto: 'semi' } })
+  await start($)
+  const ui = await mount($, 'desktop')
+  expect((await look(ui)).all).toBe('对接窗口 · 只做小改动，不能 push')
+  await ui.unmount()
+})
+
+test('状态文件写了角色时比分支名优先', async ($, on) => {
+  setup(on, { branch: 'kuaixiu/fix', file: { role: 'lead' } })
+  await start($)
+  const ui = await mount($, 'desktop')
+  expect((await look(ui)).isOn('role-lead')).toBe(true)
+  await ui.unmount()
+})
+
+test('项目配置 default_auto=semi：没写 auto 时默认半自动', async ($, on) => {
+  const s = setup(on, { file: { role: 'lead' } })
+  s.files.set(`${ROOT}/.claude/agent-dev-team.json`, JSON.stringify({ default_auto: 'semi' }))
+  await start($)
+  const ui = await mount($, 'desktop')
+  expect((await look(ui)).isOn('auto-semi')).toBe(true)
+  await ui.unmount()
 })
 
 test('有问卷占着输入框上方时让路', async ($, on) => {
