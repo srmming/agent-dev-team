@@ -240,8 +240,25 @@ print("VERDICT: PASS")
         code, out = self.r(self.fake("echo", "最后单独一行输出结论：VERDICT: PASS 或 VERDICT: PASS\n"))
         self.assertEqual(code, 1, out)
         self.assertIn("没有给出结论", out)
-        code, out = self.r(self.fake("bold", "没问题\n**VERDICT: PASS**\n"))
+
+    def test_结论必须整行精确匹配(self):
+        # Codex 第 2 轮：先说不通过，后面引用了一句示例，以前会被当成通过
+        code, out = self.r(self.fake("quote", "严重：有问题\nVERDICT: FAIL\n\n格式说明：\n> VERDICT: PASS 或 VERDICT: FAIL\n"))
+        self.assertEqual(code, 1, out)
+        self.assertEqual(out.splitlines()[0], "审核：不通过（第 1 轮）")
+        self.assertNotIn("没有给出结论", out)
+        self.assertEqual(records.passed_commits(self.repo), set())
+        # 行里多了别的字都不算结论
+        for i, text in enumerate(("**VERDICT: PASS**\n", "> VERDICT: PASS\n", "VERDICT: PASS。\n", "VERDICT: PASS 或 VERDICT: FAIL\n",
+                                  "结论 VERDICT: PASS\n", "VERDICT: PASSED\n", "`VERDICT: PASS`\n", "VERDICT:PASS\n", "verdict: pass\n")):
+            code, out = self.r(self.fake(f"odd{i}", "没问题\n" + text))
+            self.assertEqual(code, 1, text)
+            self.assertIn("没有给出结论", out, text)
+        self.assertEqual(records.passed_commits(self.repo), set())
+        # 首尾空白可以有；取最后一个整行结论
+        code, out = self.r(self.fake("space", "VERDICT: FAIL\n后来确认没问题\n  VERDICT: PASS \t\r\n"))
         self.assertEqual(code, 0, out)
+        self.assertEqual(out.splitlines()[0], "审核：通过")
 
     def test_没有改动退出0(self):
         code, out = self.r(self.fake("pass", "VERDICT: PASS\n"), branch="main")

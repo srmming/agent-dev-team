@@ -5,7 +5,6 @@
 """
 import argparse
 import os
-import re
 import shlex
 import subprocess
 import sys
@@ -17,7 +16,13 @@ import records  # noqa: E402
 DEFAULT_CMD = "codex exec --sandbox read-only -c model_reasoning_effort=max"
 TIMEOUT = 1800
 MAX_LINES = 60
-VERDICT_RE = re.compile(r"^[\s*#>`_-]*VERDICT:\s*\**\s*(PASS|FAIL)\b", re.MULTILINE)
+VERDICTS = {"VERDICT: PASS": "PASS", "VERDICT: FAIL": "FAIL"}
+
+
+def verdicts_in(out):
+    """输出里的结论：整行只有 VERDICT: PASS 或 VERDICT: FAIL（首尾可以有空白）才算，按出现顺序返回。
+    行里还有别的字（引用提示词、加粗、举例）都不算。"""
+    return [VERDICTS[ln.strip()] for ln in out.splitlines() if ln.strip() in VERDICTS]
 
 
 def default_branch(cwd):
@@ -44,7 +49,8 @@ def prompt_for(rng):
         f"在当前仓库运行 `git diff {rng}` 查看这次要合并/上传的改动，必要时阅读相关文件。\n"
         "检查：逻辑错误、会破坏现有功能的改动、安全问题、明显遗漏的测试。不要挑风格问题。\n"
         "用中文按严重程度列出问题（严重 / 一般 / 建议），每条带文件和行号。\n"
-        "有「严重」问题就不通过。最后单独一行输出结论：VERDICT: PASS 或 VERDICT: FAIL"
+        "有「严重」问题就不通过。最后单独一行输出结论：VERDICT: PASS 或 VERDICT: FAIL\n"
+        "结论那一行只写这几个字，不加粗、不加引号、不加别的符号。"
     )
 
 
@@ -119,8 +125,7 @@ def main(argv=None):
         return 2
 
     out = r.stdout or ""
-    # 结论要单独成行（允许前面有 * # > 这类标记）；提示词里引用的那句不算
-    verdicts = VERDICT_RE.findall(out)
+    verdicts = verdicts_in(out)  # 取最后一个整行结论
     if verdicts and verdicts[-1] == "PASS":
         records.add_passed(cwd, commits)  # 开跑前固定的那批提交
         records.clear_fails(cwd, a.branch)
