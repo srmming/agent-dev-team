@@ -72,7 +72,7 @@ def load_session(sid):
 
 
 def save_session(sid, **changes):
-    """改一个对话的状态，不认识的键原样保留。返回改完的内容。
+    """改一个对话的状态，不认识的键原样保留；值为 None 的键删掉。返回改完的内容。
     读-改-写整个过程加锁（几个钩子同时改也不丢键），写临时文件再换名（别人读不到写了一半的文件）。"""
     p = session_path(sid)
     os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -83,7 +83,11 @@ def save_session(sid, **changes):
         except Exception:
             pass  # 没有 fcntl（比如 Windows）就不加锁
         d = load_session(sid)
-        d.update(changes)
+        for k, v in changes.items():
+            if v is None:
+                d.pop(k, None)
+            else:
+                d[k] = v
         tmp = f"{p}.{os.getpid()}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False)

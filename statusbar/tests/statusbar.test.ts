@@ -186,6 +186,51 @@ test('状态文件 role=subagent：只显示子代理说明，没有按钮', asy
   }
 })
 
+test('子代理窗口有 agent：显示「子代理 · dev-opus · 中档」（加粗强调色）、任务名和说明（灰色）', async ($, on) => {
+  setup(on, { file: { role: 'subagent', agent: 'dev-opus', effort: '中', task: '子代理窗口识别' } })
+  await start($)
+  for (const surface of SURFACES) {
+    const ui = await mount($, surface)
+    const l = await look(ui)
+    expect(l.keys).toEqual([])
+    expect(l.texts).toEqual(['子代理 ·', 'dev-opus · 中档', '· 子代理窗口识别', '· 只做派给它的任务，不能 push 和合并'])
+    const texts = await ui.findAll({ type: 'Text' })
+    const model = texts.find((t: any) => t.text === 'dev-opus · 中档')
+    expect(model.props.bold).toBe(true)
+    expect(model.props.color).toBe('claude')
+    const task = texts.find((t: any) => t.text === '· 子代理窗口识别')
+    expect(task.props.dimColor).toBe(true)
+    expect(task.props.wrap).toBe('truncate-end')
+    await ui.unmount()
+  }
+})
+
+test('子代理窗口有 agent 没有档位和任务名：只显示名字和说明', async ($, on) => {
+  setup(on, { file: { role: 'subagent', agent: 'dev-haiku' } })
+  await start($)
+  const ui = await mount($, 'desktop')
+  expect((await look(ui)).texts).toEqual(['子代理 ·', 'dev-haiku', '· 只做派给它的任务，不能 push 和合并'])
+  await ui.unmount()
+})
+
+test('子代理窗口只有 task 没有 agent（或 agent 不是字符串）：保持原来一行说明', async ($, on) => {
+  setup(on, { file: { role: 'subagent', task: '修个 bug', agent: 3, effort: '中' } })
+  await start($)
+  const ui = await mount($, 'desktop')
+  expect((await look(ui)).all).toBe('子代理 · 只做派给它的任务，不能 push 和合并')
+  await ui.unmount()
+})
+
+test('钩子写进 agent / task 后，下一轮结束状态栏跟着变', async ($, on) => {
+  const env = setup(on, { file: { role: 'lead' } })
+  await start($)
+  env.setFile({ role: 'subagent', agent: 'dev-fable', effort: '高', task: '重构' })
+  await turnEnd($)
+  const ui = await mount($, 'terminal')
+  expect((await look(ui)).texts).toEqual(['子代理 ·', 'dev-fable · 高档', '· 重构', '· 只做派给它的任务，不能 push 和合并'])
+  await ui.unmount()
+})
+
 test('状态文件里不认识的值按默认处理；status 键优先显示', async ($, on) => {
   setup(on, { file: { role: 'boss', auto: 'maybe', status: '在改登录页' } })
   await start($)

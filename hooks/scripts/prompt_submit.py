@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """用户发消息时（UserPromptSubmit）按消息切换这个对话的模式。
-【派活单】开头 → 子代理；【快修】开头 → 对接窗口；
+【派活单】开头 → 子代理；【快修】开头 → 对接窗口；桌面应用开新会话时把消息包成
+「Background (from the session that started this one): …… Task: <派活单>」，这种包装也认。
 整条消息正好是 负责人模式 / 普通对话 / 全自动 / 半自动 → 切到对应模式。
 其他消息：角色和模式和上次告诉模型的一样（大多数时候）就不输出；不一样（比如在状态栏上点了切换）
 就把现在的角色和模式再告诉模型一次。出任何错都安静退出，不影响用户发消息。
 """
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -24,12 +26,48 @@ EXACT = {
 }
 
 
+WRAP_HEAD = "Background (from the session that started this one):"
+MARKS = ("【派活单】", "【快修】")
+# 派活单第二行：子代理：<名字> · <档位>
+AGENT_LINE = re.compile(r"^子代理\s*[：:]\s*([A-Za-z0-9_.-]+)\s*[·・]\s*(低|中|高)\s*$")
+
+
+def unwrap(text):
+    """消息开头是【派活单】/【快修】就原样返回；是桌面应用的包装（以 WRAP_HEAD 开头，某行正好是 Task:，
+    它下一个非空行以【派活单】/【快修】开头）就返回从那一行起的内容；别的返回原文（不会被认成派活单）。"""
+    if text.startswith(MARKS) or not text.startswith(WRAP_HEAD):
+        return text
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() != "Task:":
+            continue
+        rest = lines[i + 1:]
+        while rest and not rest[0].strip():
+            rest.pop(0)
+        if rest and rest[0].strip().startswith(MARKS):
+            return "\n".join(rest).strip()
+    return text
+
+
+def dispatch_info(text):
+    """从派活单里取任务名（【派活单】后到行尾）和第二行的子代理、档位。
+    没有第二行时 agent / effort 为 None：只存 task，并删掉上一张派活单留下的这两个键。"""
+    lines = text.splitlines()
+    task = lines[0][len("【派活单】"):].strip()
+    agent = effort = None
+    second = next((x.strip() for x in lines[1:] if x.strip()), "")
+    m = AGENT_LINE.match(second)
+    if m:
+        agent, effort = m.group(1), m.group(2)
+    return {"task": task, "agent": agent, "effort": effort}
+
+
 def decide(prompt, data):
     """返回 (要改的状态, 注入的附加上下文)；不用切换时返回 (None, None)。"""
-    text = (prompt or "").strip()
+    text = unwrap((prompt or "").strip())
     sid = session_id(data)
     if text.startswith("【派活单】"):
-        return {"role": "subagent"}, (
+        return dict(role="subagent", **dispatch_info(text)), (
             "【Agent 开发团队】这个窗口是子代理，忽略之前的负责人提示。按下面的守则完成这张派活单。\n\n"
             + rules_text())
     if text.startswith("【快修】"):

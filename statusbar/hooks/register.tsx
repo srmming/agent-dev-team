@@ -95,7 +95,15 @@ async function loadView($: $): Promise<StatusView> {
   const status = typeof data.status === 'string' && data.status.trim() !== '' ? data.status.trim() : null
   // pool：小任务池里攒了几个，非负整数；没有或不对当 0
   const pool = typeof data.pool === 'number' && Number.isInteger(data.pool) && data.pool >= 0 ? data.pool : 0
-  return { off, role, auto, status, pool }
+  // 子代理窗口：主插件的钩子从派活单里存下的子代理名字、档位、任务名；没有或不是字符串当 null
+  const agent = text(data.agent)
+  const effort = text(data.effort)
+  const task = text(data.task)
+  return { off, role, auto, status, pool, agent, effort, task }
+}
+
+function text(x: unknown): string | null {
+  return typeof x === 'string' && x.trim() !== '' ? x.trim() : null
 }
 
 type Row = { id: string; type: string; teammateId?: string; status: string; name?: string; description: string }
@@ -219,7 +227,30 @@ export const register: Register = on => {
     const { Box, Button, Text } = $.ui.resolve(e)
 
     if (v.role === 'kuaixiu') return <Text dimColor>对接窗口 · 只做小改动，不能 push</Text>
-    if (v.role === 'subagent') return <Text dimColor>子代理 · 只做派给它的任务，不能 push 和合并</Text>
+    if (v.role === 'subagent') {
+      if (v.agent === null) return <Text dimColor>子代理 · 只做派给它的任务，不能 push 和合并</Text>
+      // 有子代理名字时：子代理 · dev-opus · 中档（强调色加粗）  任务名（灰色，长了截短）  说明（灰色）
+      return (
+        <Box key="sub" flexDirection="row" columnGap={1}>
+          <Box key="sub-who" flexDirection="row" columnGap={1} flexShrink={0}>
+            <Text dimColor>子代理 ·</Text>
+            <Text bold color="claude">
+              {v.effort === null ? v.agent : `${v.agent} · ${v.effort}档`}
+            </Text>
+          </Box>
+          <Box key="sub-what" flexDirection="row" columnGap={1} flexShrink={1} overflow="hidden">
+            {v.task !== null ? (
+              <Text dimColor wrap="truncate-end">
+                {`· ${v.task}`}
+              </Text>
+            ) : null}
+            <Text dimColor wrap="truncate-end">
+              · 只做派给它的任务，不能 push 和合并
+            </Text>
+          </Box>
+        </Box>
+      )
+    }
 
     const list = await read($, agents)
     const isOpen = await read($, expanded)
