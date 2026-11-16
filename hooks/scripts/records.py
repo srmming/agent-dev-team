@@ -9,6 +9,7 @@
 
 旧格式的 passed 文件（一行一个提交号）已经作废：不读、不写，留着也不出错。
 """
+import hashlib
 import json
 import os
 import re
@@ -76,8 +77,15 @@ def has_legacy(cwd):
     return bool(p and os.path.exists(p))
 
 
+def branch_key(branch):
+    """按分支存的文件名用的键：可读前缀 + 完整分支名的哈希。
+    只把 / 换成 _ 会让 feat/a 和 feat_a 撞到一起，加上哈希就不会。"""
+    prefix = re.sub(r"[^A-Za-z0-9_.-]", "_", branch)[:40]
+    return prefix + "-" + hashlib.sha256(branch.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
 def _fails_path(cwd, branch):
-    return _path(cwd, "fails-" + re.sub(r"[^A-Za-z0-9_.-]", "_", branch))
+    return _path(cwd, "fails-" + branch_key(branch))
 
 
 def fails(cwd, branch):
@@ -107,10 +115,10 @@ def clear_fails(cwd, branch):
 
 
 # ---------- 上一轮没通过的审核：下一轮只复审增量用 ----------
-# last-<分支>.json：{"fork": 起点, "tip": 上一轮审到的顶端, "issues": 上一轮 Codex 的输出全文}
+# last-<分支键>.json：{"fork": 起点, "tip": 上一轮审到的顶端, "issues": 上一轮 Codex 的输出全文}
 
 def _last_path(cwd, branch):
-    return _path(cwd, "last-" + re.sub(r"[^A-Za-z0-9_.-]", "_", branch) + ".json")
+    return _path(cwd, "last-" + branch_key(branch) + ".json")
 
 
 def save_last(cwd, branch, fork, tip, issues):
@@ -137,3 +145,52 @@ def clear_last(cwd, branch):
     p = _last_path(cwd, branch)
     if p and os.path.exists(p):
         os.remove(p)
+
+
+# ---------- 审过的结论：同一段改动不再调 Codex ----------
+# cache/<键>.json：{"verdict": "PASS" 或 "FAIL", "report": 完整报告路径, "shown": 交给负责人的那段文字, ...}
+# 键由 review.py 算：分叉点、顶端提交、提示词版本、审核命令、任务说明一起取哈希。
+
+def _cache_path(cwd, key):
+    d = state_dir(cwd)
+    if not d or not re.match(r"^[0-9a-f]{64}$", key):
+        return None
+    os.makedirs(os.path.join(d, "cache"), exist_ok=True)
+    return os.path.join(d, "cache", key + ".json")
+
+
+def load_review(cwd, key):
+    """之前审过的结论。没有、读不懂返回 None。"""
+    p = _cache_path(cwd, key)
+    try:
+        with open(p, encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        return None
+    return d if isinstance(d, dict) and d.get("verdict") in ("PASS", "FAIL") and isinstance(d.get("shown"), str) else None
+
+
+def save_review(cwd, key, rec):
+    p = _cache_path(cwd, key)
+    if p:
+        tmp = f"{p}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False)
+        os.replace(tmp, p)
+
+
+def report_path(cwd, branch, n):
+    """完整报告存哪：状态目录 reports/<分支键>-r<轮次>.md。"""
+    d = state_dir(cwd)
+    if not d:
+        return None
+    os.makedirs(os.path.join(d, "reports"), exist_ok=True)
+    return os.path.join(d, "reports", f"{branch_key(branch)}-r{n}.md")
+
+
+def add_usage(cwd, row):
+    """追加一行 Codex 用量到 usage.jsonl。"""
+    p = _path(cwd, "usage.jsonl")
+    if p:
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
