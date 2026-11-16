@@ -207,7 +207,7 @@
 | `deploy_check.retries` | 检查失败后最多重试几次，默认 3 |
 | `deploy_check.interval_seconds` | 每次重试之间隔多少秒，默认 30 |
 | `db_backup_cmd` | 动数据库前的备份命令。不配时，动数据库的任务不会自动上线，负责人会先问你 |
-| `codex_cmd` | 审核命令。不写就用 `codex exec --sandbox read-only -c model_reasoning_effort=max`，型号跟着本机 Codex 配置走 |
+| `codex_cmd` | 审核命令。不写就用 `codex exec --sandbox read-only -c model_reasoning_effort=max -c service_tier=priority`，型号跟着本机 Codex 配置走，速度固定快速模式 |
 
 数字写错了（不是数字或是负数）按默认值算。
 

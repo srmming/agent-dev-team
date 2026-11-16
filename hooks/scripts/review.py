@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import default_branch, git, project_config, repo_root  # noqa: E402
 import records  # noqa: E402
 
-DEFAULT_CMD = "codex exec --sandbox read-only -c model_reasoning_effort=max"
+DEFAULT_CMD = "codex exec --sandbox read-only -c model_reasoning_effort=max -c service_tier=priority"
 TIMEOUT = 1800
 MAX_LINES = 60
 ISSUES_MAX = 20000  # 上一轮的问题清单超过这么多字就不做增量复审（不截断，免得开头的问题丢掉），改全量
