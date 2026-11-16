@@ -45,9 +45,9 @@ class Docs(unittest.TestCase):
                     self.assertTrue(os.path.exists(os.path.join(SCRIPTS, name)), name)
 
     def test_版本号都是0_2_2(self):
-        self.assertEqual(json.loads(read(".claude-plugin", "plugin.json"))["version"], "0.2.2")
+        self.assertEqual(json.loads(read(".claude-plugin", "plugin.json"))["version"], "0.2.3")
         for name in ("lead", "kuaixiu", "shouwei", "shuijiao", "qingli"):
-            self.assertIn('version: "0.2.2"', read("skills", name, "SKILL.md"), name)
+            self.assertIn('version: "0.2.3"', read("skills", name, "SKILL.md"), name)
 
     def test_技能长度(self):
         limits = {"lead": 150, "kuaixiu": 50, "shouwei": 50, "shuijiao": 50}
