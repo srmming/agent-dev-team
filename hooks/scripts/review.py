@@ -220,13 +220,14 @@ def last_message(events):
 
 
 def run_codex(cmd_text, effort, prompt, cwd, schema=None):
-    """跑审核命令，末尾追加档位。返回 (Codex 的最终回复, 用量或 None)。
-    codex exec 会加 --json、-o（和 --output-schema）；别的命令照旧只看标准输出。"""
+    """跑审核命令。返回 (Codex 的最终回复, 用量或 None)。
+    codex exec 会在末尾追加档位，再加 --json、-o（和 --output-schema）；别的命令原样调用，只看标准输出。"""
     cmd = split_cmd(cmd_text)
     if not cmd:
         raise CodexError(f"审核命令写得不对：{cmd_text}")
     use_json = is_codex_exec(cmd)
-    cmd += ["-c", f"model_reasoning_effort={effort}"]  # 后面的 -c 覆盖前面的
+    if use_json:  # 档位是 Codex 的参数，只加给 codex exec；别的命令原样调用
+        cmd += ["-c", f"model_reasoning_effort={effort}"]  # 后面的 -c 覆盖前面的
     with tempfile.TemporaryDirectory(prefix="adt-review-") as tmp:
         last = os.path.join(tmp, "last-message.txt")
         if use_json:

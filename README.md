@@ -192,7 +192,7 @@
 
 - 整个关掉：环境变量 `AGENT_DEV_TEAM=off`，或在项目里建空文件 `.claude/agent-dev-team-off`。
 - 只关审核关：环境变量 `AGENT_DEV_TEAM_CODEX=off`。全自动下上传关整个跳过；半自动下只是不查审核记录，上传命令的写法和半自动限制照旧。
-- 换审核命令：环境变量 `AGENT_DEV_TEAM_CODEX_CMD`（项目配置的 `codex_cmd` 优先）。
+- 换审核命令：环境变量 `AGENT_DEV_TEAM_CODEX_CMD`（项目配置的 `codex_cmd` 优先）。命令是 `codex exec` 时按轮次在末尾追加档位（`-c model_reasoning_effort=...`）；别的命令原样调用，不加任何参数，只把提示词放在最后。
 
 ## 项目配置（可选）
 

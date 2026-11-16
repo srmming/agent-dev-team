@@ -217,7 +217,7 @@ class 提示词和档位(Base):
         self.assertEqual(code, 0, out)
         with open(log) as f:
             args = json.load(f)
-        self.assertEqual(args[:4], ["-c", "model_reasoning_effort=low", "-c", "model_reasoning_effort=max"])
+        self.assertEqual(args[:-1], ["-c", "model_reasoning_effort=low"])  # 不是 codex exec：原样调用，只多一个提示词
         self.assertNotIn("--json", args)  # 不是 codex exec，不加 JSON 参数
 
     def test_brief原样放进提示词(self):

@@ -252,5 +252,21 @@ class 复审确认已修好(Base):
         self.assertEqual(sum(f"一般问题{i:02d} " in shown for i in range(80)), 10)
 
 
+class 档位只给codex(Base):
+    def test_只收一个参数的普通审核程序_原样调用(self):
+        fake = os.path.join(self.tmp, "plain.py")
+        with open(fake, "w") as f:
+            f.write("import argparse\nap = argparse.ArgumentParser()\nap.add_argument('prompt')\nap.parse_args()\n"
+                    "print('VERDICT: PASS')\n")
+        env = dict(self.env, AGENT_DEV_TEAM_CODEX_CMD=f"{sys.executable} {fake}")
+        code, out = self.rv(env=env)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.splitlines()[0], "审核：通过")
+
+    def test_codex_exec照样追加档位(self):
+        self.rv()
+        self.assertIn("model_reasoning_effort=max", self.calls()[-1]["args"])
+
+
 if __name__ == "__main__":
     unittest.main()
