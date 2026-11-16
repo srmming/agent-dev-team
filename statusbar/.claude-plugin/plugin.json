@@ -1,6 +1,6 @@
 {
   "name": "agent-dev-team-status",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "agent-dev-team 的状态栏：在输入框上方显示当前模式和在跑的子代理，可点按钮切换负责人模式 / 普通对话、全自动 / 半自动",
   "author": { "name": "ming" },
   "types": "./types/index.d.ts"
