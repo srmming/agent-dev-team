@@ -224,7 +224,7 @@ class LeadFlow(unittest.TestCase):
         self.assertEqual(records.fails(self.repo, "feat2"), 0)
         self.assert_allowed(merge)
 
-    def test_子代理改基准后重审_旧的通过记录不算新提交(self):
+    def test_子代理改基准后重审_旧的审核单元不算新提交(self):
         """合并冲突时子代理用 git rebase 解决，提交号变了，要重新审核才能合并。"""
         wt = self.task_branch("feat3", n=1)
         args = self.review_line(self.assert_blocked("git merge feat3"))

@@ -519,7 +519,7 @@ class Rollback(RepoCase):
     def rb(self, *args):
         return self.run_script("rollback.py", "--cwd", self.repo, *args)
 
-    def test_回滚普通提交_内容回到之前_新提交进通过记录(self):
+    def test_回滚普通提交_内容回到之前_新提交记成审核单元(self):
         bad = self.commit_change("src/a.py", "bad\n")
         code, out = self.rb("--commits", bad)
         self.assertEqual(code, 0, out)

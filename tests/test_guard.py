@@ -795,7 +795,7 @@ class RolesTest(GuardCase):
 
 
 class ReviewUnitTest(GuardCase):
-    """审核记录：通过记录绑定「实际审核过的最终状态」。只带了某个审核单元的一部分就拦。"""
+    """审核记录绑定「实际审核过的最终状态」。只带了某个审核单元的一部分就拦。"""
 
     def setUp(self):
         super().setUp()
