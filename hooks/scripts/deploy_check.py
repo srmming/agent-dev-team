@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """agent-dev-team 上线检查：推送后确认线上是不是正常。
 1. 项目配置有 deploy_check.cmd：等一会儿后跑它，失败就重试。
-2. 没配命令、远端是 GitHub、本机有 gh：查这个提交的检查结果（check runs）、提交状态（commit statuses）和部署状态。
+2. 没配命令、远端是 GitHub、本机有 gh：查这个提交的检查结果（check runs）、提交状态（commit statuses）和部署状态，
+   分行报告「测试」和「部署」。有部署记录且成功才算通过；没有部署记录（只有测试通过）是无法判断。
 3. 都没有：无法判断。
 输出第一行是结论。退出码：通过 0，不通过 1，无法判断 3。
 """
@@ -57,11 +58,21 @@ def github_repo(cwd):
 
 
 def github_status(cwd, repo, sha):
-    """查一次。返回 (状态, 说明行)，状态是 ok / fail / running / none。
+    """查一次。返回 (状态, 说明行)，状态是 ok / fail / running / none。细节见 github_report。"""
+    r = github_report(cwd, repo, sha)
+    return r["state"], r["lines"]
+
+
+def github_report(cwd, repo, sha):
+    """查一次，返回 {state, lines, test, deploy}。state 是 ok / fail / running / none。
+    test 是 通过 / 不通过 / 没有 / 还在跑，deploy 是 成功 / 失败 / 没有记录 / 还在跑 / 未确认。
+    只有测试（检查结果、提交状态）成功、没有部署记录时 state 是 none：测试通过不等于部署成功。
     同一来源的同名检查、同一环境的部署可能有好几次（重跑、重新部署），每个只看最新一次。
     检查结果（check runs）和提交状态（commit statuses）是两套东西，有的 CI 只报其中一套，两套都查。
     任何一项查询失败都不报通过：确定有失败报 fail，否则报 none（无法判断）。"""
-    bad, running, unknown, seen = [], [], [], 0
+    bad, running, unknown = [], [], []
+    t_bad, t_run, t_seen = [], [], 0
+    d_bad, d_run, d_seen, d_unsure = [], [], 0, False
     runs = gh_api(cwd, f"repos/{repo}/commits/{sha}/check-runs?per_page=100")
     if not isinstance(runs, dict) or not isinstance(runs.get("check_runs"), list):
         unknown.append("查不到检查结果（gh 查询失败）")
@@ -69,12 +80,12 @@ def github_status(cwd, repo, sha):
     elif isinstance(runs.get("total_count"), int) and runs["total_count"] > len(runs["check_runs"]):
         unknown.append(f"检查有 {runs['total_count']} 个，只查到 {len(runs['check_runs'])} 个")
     for c in _latest(runs["check_runs"], _check_key, "started_at"):
-        seen += 1
+        t_seen += 1
         name = c.get("name", "?")
         if c.get("status") != "completed":
-            running.append(f"检查 {name} 还在跑")
+            t_run.append(f"检查 {name} 还在跑")
         elif c.get("conclusion") not in CHECK_OK:
-            bad.append(f"检查 {name}：{c.get('conclusion')}")
+            t_bad.append(f"检查 {name}：{c.get('conclusion')}")
     # 提交状态：接口给的是每个 context 最新的一条，外加一个合起来的 state
     st = gh_api(cwd, f"repos/{repo}/commits/{sha}/status?per_page=100")
     if not isinstance(st, dict) or not isinstance(st.get("statuses"), list):
@@ -84,43 +95,56 @@ def github_status(cwd, repo, sha):
         if isinstance(st.get("total_count"), int) and st["total_count"] > len(items):
             unknown.append(f"提交状态有 {st['total_count']} 个，只查到 {len(items)} 个")
         for x in items:
-            seen += 1
+            t_seen += 1
             if x.get("state") in STATUS_BAD:
-                bad.append(f"状态 {x.get('context', '?')}：{x.get('state')}")
+                t_bad.append(f"状态 {x.get('context', '?')}：{x.get('state')}")
             elif x.get("state") != "success":
-                running.append(f"状态 {x.get('context', '?')} 还没出结果（{x.get('state')}）")
+                t_run.append(f"状态 {x.get('context', '?')} 还没出结果（{x.get('state')}）")
         # 合起来的 state 也看一眼：一条状态都没有时它是 pending，那不算在等
         if st.get("state") in STATUS_BAD and not any(x.get("state") in STATUS_BAD for x in items):
-            bad.append(f"提交状态：{st.get('state')}")
+            t_bad.append(f"提交状态：{st.get('state')}")
         elif items and st.get("state") == "pending" and all(x.get("state") == "success" for x in items):
-            running.append("提交状态还没出结果（pending）")
+            t_run.append("提交状态还没出结果（pending）")
     deps = gh_api(cwd, f"repos/{repo}/deployments?sha={sha}&per_page=100")
     if not isinstance(deps, list):
         unknown.append("查不到部署记录（gh 查询失败）")
+        d_unsure = True
         deps = []
     for d in _latest(deps, "environment", "created_at"):
-        seen += 1
+        d_seen += 1
         env = d.get("environment", "?")
         sts = gh_api(cwd, f"repos/{repo}/deployments/{d.get('id')}/statuses?per_page=1")
         if not isinstance(sts, list):
             unknown.append(f"查不到部署 {env} 的状态（gh 查询失败）")
+            d_unsure = True
             continue
         state = sts[0].get("state") if sts and isinstance(sts[0], dict) else "pending"
         if state in DEPLOY_BAD:
-            bad.append(f"部署 {env}：{state}")
+            d_bad.append(f"部署 {env}：{state}")
         elif state == "inactive":
             unknown.append(f"部署 {env} 状态 inactive（已被别的部署替换，看不出这次部署成没成功）")
+            d_unsure = True
         elif state not in DEPLOY_OK:
-            running.append(f"部署 {env} 状态 {state}")
+            d_run.append(f"部署 {env} 状态 {state}")
+    bad, running = t_bad + d_bad, t_run + d_run
+    test = "不通过" if t_bad else "还在跑" if t_run else "通过" if t_seen else "没有"
+    deploy = ("失败" if d_bad else "未确认" if d_unsure else "还在跑" if d_run else
+              "成功" if d_seen else "没有记录")
+
+    def out(state, lines):
+        return {"state": state, "lines": lines, "test": test, "deploy": deploy}
     if bad:
-        return "fail", bad
+        return out("fail", bad)
     if unknown:
-        return "none", unknown
+        return out("none", unknown)
     if running:
-        return "running", running
-    if seen:
-        return "ok", []
-    return "none", ["GitHub 上这个提交没有检查结果、没有提交状态，也没有部署记录"]
+        return out("running", running)
+    if d_seen:
+        return out("ok", [])
+    # 没有部署记录：测试再通过也只是测试通过，线上有没有部署成功没有证据
+    if t_seen:
+        return out("none", ["测试通过，部署未确认（GitHub 上这个提交没有部署记录）"])
+    return out("none", ["GitHub 上这个提交没有检查结果、没有提交状态，也没有部署记录"])
 
 
 def _check_key(c):
@@ -182,23 +206,20 @@ def check_by_github(cwd, repo, sha, a):
     interval = a.interval if a.interval is not None else 15
     deadline = time.monotonic() + a.max_poll
     while True:
-        state, lines = github_status(cwd, repo, sha)
-        if state != "running" or time.monotonic() >= deadline:
+        r = github_report(cwd, repo, sha)
+        if r["state"] != "running" or time.monotonic() >= deadline:
             break
         time.sleep(interval)
-    if state == "ok":
-        print("上线检查：通过")
-        print("GitHub 上的检查、提交状态和部署都成功")
-        return 0
-    if state == "fail":
-        print("上线检查：不通过")
-        print("\n".join(lines[:TAIL]))
-        return 1
-    print("上线检查：无法判断")
+    state, lines = r["state"], r["lines"]
+    # 结论规则：任何一项失败不通过；部署有记录且成功、测试没失败才通过；没有部署记录一律无法判断
+    print({"ok": "上线检查：通过", "fail": "上线检查：不通过"}.get(state, "上线检查：无法判断"))
+    print(f"测试：{r['test']}")
+    print(f"部署：{r['deploy']}")
     if state == "running":
         print(f"等了 {int(a.max_poll)} 秒还没跑完：")
-    print("\n".join(lines[:TAIL]))
-    return 3
+    if lines:
+        print("\n".join(lines[:TAIL]))
+    return {"ok": 0, "fail": 1}.get(state, 3)
 
 
 def main(argv=None):
