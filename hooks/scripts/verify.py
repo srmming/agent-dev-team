@@ -48,8 +48,21 @@ def main(argv=None):
             more = f"\n……另有 {len(outside) - len(shown)} 个" if len(outside) > len(shown) else ""
             reasons.append("改了范围外的文件：\n" + "\n".join("  " + f for f in shown) + more)
 
+    # 命令在 --cwd 当前的代码上跑：要正好是被验收分支的顶端、没有没提交的改动，不然测的不是要验收的东西
+    stale = None
+    if a.cmd:
+        head = git(cwd, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+        tip = git(cwd, "rev-parse", "--verify", "--quiet", a.branch + "^{commit}")
+        dirty = git(cwd, "status", "--porcelain")
+        if head != tip:
+            stale = (f"{cwd} 当前的提交 {(head or '?')[:12]} 不是 {a.branch} 的顶端 {tip[:12]}，"
+                     f"完成标准命令没跑。在 {a.branch} 的工作副本里验收。")
+        elif dirty != "":
+            stale = f"{cwd} 有没提交的改动（或者 git status 查不了），完成标准命令没跑。先提交或清掉再验收。"
+        reasons += [stale] if stale else []
+
     # 命令按顺序跑，遇到第一条失败就停，省时间
-    for c in a.cmd:
+    for c in [] if stale else a.cmd:
         code, out = run_shell(c, cwd, a.timeout)
         if code == 0:
             continue

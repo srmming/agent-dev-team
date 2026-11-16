@@ -74,8 +74,34 @@ class RepoCase(unittest.TestCase):
 
 
 class Verify(RepoCase):
+    def setUp(self):
+        super().setUp()
+        sh(self.repo, "checkout", "-q", "feat")  # 测试要在被验收的分支上跑
+
     def v(self, *args):
         return self.run_script("verify.py", "--branch", "feat", "--cwd", self.repo, *args)
+
+    def test_cwd当前不是被验收分支的顶端_不跑命令直接不通过(self):
+        sh(self.repo, "checkout", "-q", "main")
+        code, out = self.v("--cmd", "touch ran")
+        self.assertEqual(code, 1, out)
+        self.assertEqual(out.splitlines()[0], "验收：不通过")
+        self.assertIn("不是 feat 的顶端", out)
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "ran")))
+        # 游离在 feat 的顶端也行：看的是提交，不是分支名
+        sh(self.repo, "checkout", "-q", "--detach", "feat")
+        code, out = self.v("--cmd", "true")
+        self.assertEqual(code, 0, out)
+
+    def test_cwd有没提交的改动_不通过(self):
+        for change in (lambda: self.write("src/a.py", "dirty\n"),    # 改了已跟踪的文件
+                       lambda: self.write("src/new.py", "x\n"),      # 新文件没加进去
+                       lambda: sh(self.repo, "add", "-A")):          # 加进暂存区但没提交
+            change()
+            code, out = self.v("--cmd", "true")
+            self.assertEqual(code, 1, out)
+            self.assertEqual(out.splitlines()[0], "验收：不通过")
+            self.assertIn("没提交的改动", out)
 
     def test_范围内通过(self):
         code, out = self.v("--allow", "src/*", "--allow", "docs/*", "--cmd", "true")
@@ -480,6 +506,25 @@ class DeployCheckGitHub(RepoCase):
             {"id": 2, "name": "ci", "status": "completed", "conclusion": "success", "started_at": "2026-11-16T10:05:00Z"},
             {"id": 1, "name": "ci", "status": "completed", "conclusion": "failure", "started_at": "2026-11-16T10:00:00Z"}]}
         self.fake_by_id(runs, [], {})
+        code, out = self.d()
+        self.assertEqual(code, 0, out)
+
+    def test_不同来源的同名检查_各算各的(self):
+        def run(i, app, suite, conclusion, t):
+            return {"id": i, "name": "build", "status": "completed", "conclusion": conclusion,
+                    "started_at": f"2026-11-16T10:0{t}:00Z", "app": app, "check_suite": {"id": suite}}
+        gha, circle = {"id": 15368, "slug": "github-actions"}, {"id": 18001, "slug": "circleci-checks"}
+        for runs in (
+                [run(1, gha, 100, "failure", 0), run(2, circle, 200, "success", 5)],   # 两个 CI 都叫 build
+                [run(1, gha, 100, "failure", 0), run(2, gha, 101, "success", 5)],      # 同一个 CI 的两个工作流
+                [run(1, {"slug": "a"}, None, "failure", 0), run(2, {"slug": "b"}, None, "success", 5)]):  # 只有 slug
+            self.fake_by_id({"total_count": 2, "check_runs": runs}, [], {})
+            code, out = self.d()
+            self.assertEqual(code, 1, out)
+            self.assertIn("检查 build：failure", out)
+        # 同一来源、同一个工作流里重跑：只看最新一次
+        self.fake_by_id({"total_count": 2, "check_runs": [run(1, gha, 100, "failure", 0),
+                                                          run(2, gha, 100, "success", 5)]}, [], {})
         code, out = self.d()
         self.assertEqual(code, 0, out)
 

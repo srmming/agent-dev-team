@@ -1385,6 +1385,35 @@ class UploadGateTest(GuardCase):
             self.allow(self.repo, "git push")
             self.allow(self.repo, "git push origin main")
 
+    def test_push_开了followTags_所有写法都拦_加no_follow_tags放行(self):
+        self.all_reviewed()
+        cmds = ("git push", "git push origin", "git push origin main", "git push origin main:main",
+                "git push -u origin feat", "git push origin feat:feat")
+        for val in ("true", "yes", "on", "1"):
+            self.git(self.repo, "config", "push.followTags", val)
+            for cmd in cmds:
+                msg = self.deny(self.repo, cmd, "push.followTags")
+                self.assertIn("--no-follow-tags", msg)
+        # 只写了键没写值也是 true
+        self.git(self.repo, "config", "--unset", "push.followTags")
+        with open(os.path.join(self.repo, ".git", "config"), "a") as f:
+            f.write("[push]\n\tfollowTags\n")
+        self.deny(self.repo, "git push origin main:main", "push.followTags")
+        for cmd in cmds:
+            self.allow(self.repo, cmd.replace("git push", "git push --no-follow-tags", 1))
+        self.allow(self.repo, "git push origin main:main --no-follow-tags")
+        self.deny(self.repo, "git push --follow-tags origin main:main", "看不懂 git push 的选项")
+        # 和别的推送配置一起：写明两边也要过 followTags 这一关
+        self.git(self.repo, "config", "push.default", "matching")
+        self.deny(self.repo, "git push origin main:main", "push.followTags")
+        self.allow(self.repo, "git push --no-follow-tags origin main:main")
+        self.deny(self.repo, "git push --no-follow-tags origin main", "仓库配置了 push.default")
+        self.git(self.repo, "config", "--unset", "push.default")
+        self.git(self.repo, "config", "--unset-all", "push.followTags")
+        self.git(self.repo, "config", "push.followTags", "false")
+        for cmd in cmds:
+            self.allow(self.repo, cmd)
+
     def test_push_不带分支时要有同名的上游(self):
         self.all_reviewed()
         wt = os.path.join(self.tmp, "wt")
@@ -1750,6 +1779,23 @@ class SemiAutoTest(GuardCase):
         self.git(self.repo, "config", "push.default", "upstream")  # 这样 git push origin feat 会推到 main
         self.deny(wt, "git push origin feat", "仓库配置了")
         self.deny(wt, "git push origin feat:main", "半自动模式：不直接推 main")
+
+    def test_半自动_看推到的那个远端自己的主分支(self):
+        # origin 的主分支是 main，upstream 的是 master：推到 upstream 的 master 也是推主分支
+        up = os.path.join(self.tmp, "upstream.git")
+        self.git(self.tmp, "init", "-q", "--bare", "-b", "master", up)
+        self.git(self.repo, "remote", "add", "upstream", up)
+        self.git(self.repo, "push", "-q", "upstream", "main:master")
+        self.git(self.repo, "remote", "set-head", "origin", "main")
+        self.deny(self.repo, "git push upstream feat:master", "半自动模式：不直接推 master")
+        self.allow(self.repo, "git push upstream feat:feat")
+        self.deny(self.repo, "git push origin feat:main", "半自动模式：不直接推 main")
+        # 推到的远端查不出主分支：拦
+        third = os.path.join(self.tmp, "third.git")
+        self.git(self.tmp, "init", "-q", "--bare", "-b", "trunk", third)
+        self.git(self.repo, "remote", "add", "third", third)
+        self.git(self.repo, "push", "-q", "third", "main:trunk")
+        self.deny(self.repo, "git push third feat:trunk", "查不出")
 
 
 class LeadSkillCommandsTest(GuardCase):

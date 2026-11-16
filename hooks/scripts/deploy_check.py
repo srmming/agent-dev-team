@@ -58,7 +58,7 @@ def github_repo(cwd):
 
 def github_status(cwd, repo, sha):
     """查一次。返回 (状态, 说明行)，状态是 ok / fail / running / none。
-    同名检查、同一环境的部署可能有好几次（重跑、重新部署），每个只看最新一次。
+    同一来源的同名检查、同一环境的部署可能有好几次（重跑、重新部署），每个只看最新一次。
     检查结果（check runs）和提交状态（commit statuses）是两套东西，有的 CI 只报其中一套，两套都查。
     任何一项查询失败都不报通过：确定有失败报 fail，否则报 none（无法判断）。"""
     bad, running, unknown, seen = [], [], [], 0
@@ -68,7 +68,7 @@ def github_status(cwd, repo, sha):
         runs = {"check_runs": []}
     elif isinstance(runs.get("total_count"), int) and runs["total_count"] > len(runs["check_runs"]):
         unknown.append(f"检查有 {runs['total_count']} 个，只查到 {len(runs['check_runs'])} 个")
-    for c in _latest(runs["check_runs"], "name", "started_at"):
+    for c in _latest(runs["check_runs"], _check_key, "started_at"):
         seen += 1
         name = c.get("name", "?")
         if c.get("status") != "completed":
@@ -121,13 +121,21 @@ def github_status(cwd, repo, sha):
     return "none", ["GitHub 上这个提交没有检查结果、没有提交状态，也没有部署记录"]
 
 
+def _check_key(c):
+    """检查的来源加名字。不同 CI（app）、同一个 CI 的不同工作流（check suite）里同名的检查各算各的，
+    来源和名字都一样的才算重跑。提交状态不用分：接口给的就是每个 context 最新的一条。"""
+    app = c.get("app") if isinstance(c.get("app"), dict) else {}
+    suite = c.get("check_suite") if isinstance(c.get("check_suite"), dict) else {}
+    return str(app.get("id") or app.get("slug")), str(suite.get("id")), str(c.get("name", "?"))
+
+
 def _latest(items, key, time_key):
-    """按 key 分组，每组只留最新的一个（先比时间，再比 id）。"""
+    """按 key（字段名，或从一项算出分组的函数）分组，每组只留最新的一个（先比时间，再比 id）。"""
     best = {}
     for it in items:
         if not isinstance(it, dict):
             continue
-        k = it.get(key, "?")
+        k = key(it) if callable(key) else it.get(key, "?")
         rank = (str(it.get(time_key) or ""), it.get("id") if isinstance(it.get("id"), int) else 0)
         if k not in best or rank > best[k][0]:
             best[k] = (rank, it)

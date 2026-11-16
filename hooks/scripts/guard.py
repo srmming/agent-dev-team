@@ -932,8 +932,9 @@ def may_ship(cmd):
 
 REF_RE = re.compile(r"^[\w./@-]+$")
 MERGE_FLAGS = {"--no-ff", "--ff", "--ff-only", "--no-edit", "-q", "--quiet", "--stat", "--no-stat"}
-PUSH_FLAGS = {"-u", "--set-upstream", "-q", "--quiet", "-v", "--verbose", "--progress", "-n", "--dry-run"}
-PUSH_CONFIG = r"^(push\.default|remote\.pushdefault|remote\..*\.(push|mirror)|branch\..*\.pushremote)$"
+PUSH_FLAGS = {"-u", "--set-upstream", "-q", "--quiet", "-v", "--verbose", "--progress", "-n", "--dry-run",
+              "--no-follow-tags"}
+PUSH_CONFIG = r"^(push\.default|push\.followtags|remote\.pushdefault|remote\..*\.(push|mirror)|branch\..*\.pushremote)$"
 GH_PR_VALUES = {"-a", "--assignee", "-B", "--base", "-b", "--body", "-F", "--body-file", "-H", "--head",
                 "-l", "--label", "-m", "--milestone", "-p", "--project", "-r", "--reviewer",
                 "-T", "--template", "-t", "--title"}
@@ -949,7 +950,7 @@ UPLOAD_FORM = ("命令里出现了 push / merge 这类词。上传命令（合�
                "不是上传（只是搜索这些词，或者分支名、文件名里带这些词）：换个不含这些词的写法，或者派给子代理。")
 MERGE_HELP = "守卫只认 `git merge [--no-ff] [--no-edit] <分支> [-m <说明>]` 和 `git merge --abort`。"
 PUSH_HELP = ("守卫只认这几种写法：`git push`、`git push <远端>`、`git push <远端> <分支>`、"
-             "`git push <远端> <本地分支>:<远端分支>`，前面可以加 -u。")
+             "`git push <远端> <本地分支>:<远端分支>`，前面可以加 -u、--no-follow-tags。")
 PR_HELP = "守卫只认 `gh pr create` 加 --head / --base / --title / --body / --fill / --draft 这类选项，不能用 -R 指定别的仓库。"
 SEMI_PR = "半自动模式：PR 由用户自己点合并，负责人不合并 PR、不直接改远端分支。用户说「全自动」可以切回去。"
 SEMI_HOW = "开 PR 等用户点合并。做法：推任务分支，再 gh pr create。用户说「全自动」可以切回去。"
@@ -1126,8 +1127,9 @@ def merge_plan(cwd, args):
             "tip": tip, "target": cur}
 
 
-def push_config_problem(cwd):
-    """没明确写「本地:远端」时，推什么、推到哪要看仓库配置。配置了这些，守卫就看不懂了：
+def push_config_problem(cwd, explicit, no_tags):
+    """推送前查仓库配置，所有写法都查。push.followTags 为真时推分支会顺带推上标签（no_tags：命令带了 --no-follow-tags）。
+    没明确写「本地:远端」时（explicit 为假），推什么、推到哪还要看这些配置，配置了守卫就看不懂了：
     push.default 不是 simple / current、remote.<名>.push、remote.<名>.mirror、pushRemote、pushDefault。
     返回有问题的配置名，没有返回 None。"""
     try:
@@ -1139,9 +1141,11 @@ def push_config_problem(cwd):
         return "（git config 查不了）"
     for line in r.stdout.splitlines():
         key, _, val = line.partition(" ")
-        if key == "push.default" and val.strip() in ("simple", "current"):
-            continue
-        return key
+        if key == "push.followtags":  # 只写了键没写值也是 true
+            if not (no_tags or val.strip().lower() in ("false", "no", "off", "0")):
+                return "push.followTags"
+        elif not explicit and not (key == "push.default" and val.strip() in ("simple", "current")):
+            return key
     return None
 
 
@@ -1162,24 +1166,27 @@ def push_plan(cwd, args):
     if not names:
         return "这个仓库没有配置远端，推不了。"
     cur = current_branch(cwd)
-    if len(pos) == 2 and ":" in pos[1]:
-        remote, (src, dst) = pos[0], pos[1].split(":", 1)  # 两边都写明了，不受仓库配置影响
+    explicit = len(pos) == 2 and ":" in pos[1]  # 两边都写明了：推到哪不受仓库配置影响，但 followTags 照样会推标签
+    bad = push_config_problem(cwd, explicit, "--no-follow-tags" in args)
+    if bad == "push.followTags":
+        return ("仓库配置了 push.followTags，推分支会顺带推上标签。改用 `git push --no-follow-tags …`，"
+                "或者关掉这个配置（`git config push.followTags false`）。")
+    if bad:
+        return (f"仓库配置了 {bad}，守卫看不出这条命令会推到哪里。"
+                "改用两边都写明的写法：`git push <远端> <本地分支>:<远端分支>`。")
+    if explicit:
+        remote, (src, dst) = pos[0], pos[1].split(":", 1)
+    elif len(pos) == 2:
+        remote, src = pos
+        dst = cur if src == "HEAD" else src
     else:
-        bad = push_config_problem(cwd)
-        if bad:
-            return (f"仓库配置了 {bad}，守卫看不出这条命令会推到哪里。"
-                    "改用两边都写明的写法：`git push <远端> <本地分支>:<远端分支>`。")
-        if len(pos) == 2:
-            remote, src = pos
-            dst = cur if src == "HEAD" else src
-        else:
-            # 不带分支：只认「当前分支的上游就是同名的远端分支」
-            up = git(cwd, "config", "--get", f"branch.{cur}.remote") if cur not in ("", "HEAD") else None
-            same_name = up and git(cwd, "config", "--get", f"branch.{cur}.merge") == "refs/heads/" + cur
-            if not same_name or (pos and pos[0] != up):
-                return ("当前分支没有同名的上游分支，守卫看不出会推到哪里。"
-                        "改用 `git push -u <远端> <分支>`。")
-            remote, src, dst = up, "HEAD", cur
+        # 不带分支：只认「当前分支的上游就是同名的远端分支」
+        up = git(cwd, "config", "--get", f"branch.{cur}.remote") if cur not in ("", "HEAD") else None
+        same_name = up and git(cwd, "config", "--get", f"branch.{cur}.merge") == "refs/heads/" + cur
+        if not same_name or (pos and pos[0] != up):
+            return ("当前分支没有同名的上游分支，守卫看不出会推到哪里。"
+                    "改用 `git push -u <远端> <分支>`。")
+        remote, src, dst = up, "HEAD", cur
     if remote not in names:
         return f"`{remote}` 不是这个仓库配置的远端（不能直接推到网址或路径）。" + PUSH_HELP
     src = src[len("refs/heads/"):] if src.startswith("refs/heads/") else src
@@ -1335,10 +1342,11 @@ def check_upload(cwd, cmd, kinds, semi, codex_off):
     if plan is None or isinstance(plan, str):
         return plan
     if semi and kind != "pr-create" and remotes(cwd):
-        default = default_branch(cwd)
+        r = plan.get("remote")  # 推送：看推到的那个远端自己的主分支（各个远端的主分支可以不一样）
+        default = (remote_default(cwd, r) or "")[len(f"refs/remotes/{r}/"):] if r else default_branch(cwd)
         if not default:
             return ("半自动模式：守卫查不出这个仓库的主分支是哪个，不能放行。"
-                    "先运行 `git remote set-head origin -a`。")
+                    f"先运行 `git remote set-head {r or 'origin'} -a`。")
         if plan["target"] == default:
             return f"半自动模式：不直接{'合并进' if kind == 'merge' else '推'} {default}，{SEMI_HOW}"
     if codex_off:
