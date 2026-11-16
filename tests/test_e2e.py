@@ -161,7 +161,7 @@ class LeadFlow(unittest.TestCase):
             call = json.loads(f.readline())
         main_sha = self.git(self.repo, "rev-parse", "main")
         feat_sha = self.git(self.repo, "rev-parse", "feat")
-        self.assertIn(f"git diff {main_sha}...{feat_sha}", call["args"][-1])  # 提示词是最后一个参数，用固定提交号
+        self.assertIn(f"git diff {main_sha}..{feat_sha}", call["args"][-1])  # 提示词是最后一个参数，用固定提交号
         self.assertIn("VERDICT: PASS", call["args"][-1])
         # 记下的是一个审核单元：顶端是分支顶端，里面是这一段的两个提交
         self.assertEqual(self.units(), [(feat_sha, set(self.git(self.repo, "rev-list", "main..feat").split()))])
@@ -234,7 +234,7 @@ class LeadFlow(unittest.TestCase):
         self.write(self.repo, "app.py", "v3\n")
         self.git(self.repo, "commit", "-q", "-am", "主分支前进")
         head = self.git(self.repo, "rev-parse", "HEAD")
-        records.add_unit(self.repo, head, [head])
+        records.add_unit(self.repo, head, self.git(self.repo, "rev-parse", "HEAD~1"), [head])
         self.git(wt, "rebase", "-q", "main")
         self.assert_blocked("git merge feat3")
         self.assertEqual(self.run_review(args, "VERDICT: PASS")[0], 0)
@@ -277,6 +277,31 @@ class LeadFlow(unittest.TestCase):
         self.assert_allowed("git push")
         self.git(self.repo, "push", "-q")
         self.assertEqual(self.git(os.path.join(self.tmp, "origin.git"), "rev-parse", "main"), b)
+
+    def test_两次没有改动的审核拼不出一个通过(self):
+        """A 加坏文件、B 撤销、C 再撤销 B。先审整段到 B，再从 A 审到 C，两次都是「没有改动」，
+        Codex 一次都没被调用。第二次审核的起点 A 没通过过，所以不算数。"""
+        wt = os.path.join(self.tmp, "wt-chain")
+        self.git(self.repo, "worktree", "add", "-q", "-b", "chain", wt)
+        self.write(wt, "bad.py", "坏\n")
+        self.git(wt, "add", "-A")
+        self.git(wt, "commit", "-q", "-m", "A")
+        a = self.git(wt, "rev-parse", "HEAD")
+        self.git(wt, "revert", "--no-edit", "HEAD")
+        review = [os.path.join(SCRIPTS, "review.py"), "--branch", "chain", "--cwd", self.repo]
+        code, out = self.run_review(review, "VERDICT: FAIL")
+        self.assertEqual((code, out.splitlines()[0]), (0, "审核：没有改动"), out)
+        self.assert_allowed("git merge chain")  # 到 B 为止没问题
+        self.git(wt, "revert", "--no-edit", "HEAD")  # C：坏文件又回来了
+        code, out = self.run_review(review + ["--base", a], "VERDICT: FAIL")
+        self.assertEqual((code, out.splitlines()[0]), (0, "审核：没有改动"), out)
+        self.assertFalse(os.path.exists(self.calls_file))
+        err = self.assert_blocked("git merge chain")
+        self.assertIn("起点是个还没通过审核的状态", err)
+        # 照提示从主分支把整段重审：这回有改动，要真的过 Codex
+        code, out = self.run_review(self.review_line(err), "严重：bad.py\nVERDICT: FAIL\n")
+        self.assertEqual(code, 1, out)
+        self.assert_blocked("git merge chain")
 
     def test_多个任务分支先后合并_快进和非快进_推主分支都不误拦(self):
         for name in ("t1", "t2", "t3"):

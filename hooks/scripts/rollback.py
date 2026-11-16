@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""agent-dev-team 回滚：按给的顺序 git revert 提交，全部撤回成功后把这批回滚提交记成一个审核单元，可选接着推送。
+"""agent-dev-team 回滚：按给的顺序 git revert 提交；撤回之后的内容和某个被撤回提交之前一模一样时，
+记一个审核单元（起点是那个「之前」的提交）。可选接着推送。
 只撤回代码，不碰数据库。输出第一行是结论。退出码：完成 0，失败 1。
 """
 import argparse
@@ -92,32 +93,40 @@ def main(argv=None):
             return fail(f"找不到提交 {c}", [])
         if git(cwd, "merge-base", "--is-ancestor", sha, "HEAD") is None:
             return fail(f"提交 {c} 不在当前分支的历史里，不能在这里撤回。", [])
-        parents = (git(cwd, "rev-list", "--parents", "-n", "1", sha) or "").split()
-        targets.append((sha, len(parents) > 2))
+        parents = (git(cwd, "rev-list", "--parents", "-n", "1", sha) or "").split()[1:]
+        targets.append((sha, parents))
 
     done = []
-    for sha, is_merge in targets:
-        args = ["revert", "--no-edit"] + (["-m", "1"] if is_merge else []) + [sha]
+    for sha, parents in targets:
+        args = ["revert", "--no-edit"] + (["-m", "1"] if len(parents) > 1 else []) + [sha]
         code, out = run_git(cwd, *args)
         if code != 0:
             run_git(cwd, "revert", "--abort")  # 开头查过没有别的操作在进行，这里中止的只会是自己这次
             # 只撤回了一部分：停在一个没人审核过的中间状态，不记进审核记录
             return fail(f"撤回 {sha[:12]} 失败：\n{tail(out)}", done)
         done.append(git(cwd, "rev-parse", "HEAD"))
-    # 全部撤回后回到的是审核过的状态：这批回滚提交记成一个审核单元（要整批一起推），推送时不用再审
-    records.add_unit(cwd, done[-1], done)
+    # 撤回之后的内容，和某个被撤回提交之前的内容一模一样：等于回到了那个状态，记一个审核单元，
+    # 起点就是那个「之前」的提交。那个状态本身通过了（比如早就推上去了），守卫才认这个单元。
+    # 对不上（只撤回了中间的一段）就不记：这是个没人审过的新状态，推送前要先审核。
+    tree = git(cwd, "rev-parse", "HEAD^{tree}")
+    fork = next((ps[0] for _, ps in targets if ps and tree and git(cwd, "rev-parse", ps[0] + "^{tree}") == tree), None)
+    if fork:
+        records.add_unit(cwd, done[-1], fork, (git(cwd, "rev-list", f"{fork}..HEAD") or done[-1]).split())
 
     if a.push:
         # 守卫看不到脚本里的 git push，这里用守卫同一套规则自己查一遍
         reason, args = push_args(cwd)
         if reason:
-            return fail("不推送：" + reason, done, recorded=True)
+            return fail("不推送：" + reason, done, recorded=bool(fork))
         code, out = run_git(cwd, "push", *args)
         if code != 0:
-            return fail(f"git push 失败：\n{tail(out)}", done, recorded=True)
+            return fail(f"git push 失败：\n{tail(out)}", done, recorded=bool(fork))
 
     print("回滚：完成" + ("（已推送）" if a.push else ""))
     print("回滚提交：" + " ".join(s[:12] for s in done))
+    if not fork:
+        print("注意：撤回之后的内容不等于任何一个被撤回提交之前的状态（只撤回了中间的一段），"
+              "没有记进审核记录，推送前要先审核。")
     return 0
 
 

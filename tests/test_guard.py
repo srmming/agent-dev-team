@@ -293,6 +293,11 @@ class ShipWords(unittest.TestCase):
             "git send-pack origin main",
             "git subtree push --prefix=a origin b",
             "git lfs push origin main",
+            "gh pr new --fill",                     # new 是 create 的别名
+            "gh pr -R o/r create --fill",           # pr 和子命令之间夹着选项
+            "gh pr --repo o/r merge 1 --squash",
+            "gh pr --repo=o/r merge 1",
+            "gh repo create o/r --source . --push",
         )
 
     def test_不是上传命令(self):
@@ -312,7 +317,15 @@ class ShipWords(unittest.TestCase):
             "git fetch origin",
             "gh pr view 12",
             "gh pr list",
+            "gh pr list --search merge",
+            "gh pr view 12 --json mergeable",
+            "gh pr checks 12",
             "gh repo create x",
+            "which git && git merge-base main HEAD",
+            "brew install git; npm test -- push",
+            "git commit -m \"$(cat <<'EOF'\nfix: don't merge duplicate entries\nEOF\n)\"",
+            "git commit -m \"$(cat <<'EOF'\npush notifications (part 1\nEOF\n)\"",
+            "git commit -m \"$(cat <<EOF\nit's a \"merge\" fix\nEOF\n)\"",
             "cat <<'EOF'\ngit push\nEOF",
             "cat <<EOF\ngit push\nEOF",
             "python3 - <<EOF\ngit push\nEOF",
@@ -423,6 +436,13 @@ class ShipWords(unittest.TestCase):
             "env FOO=1 bash -c 'env -u X rtk proxy git push'",
             "strace sh -c 'git push'",
             "ls | xargs -I{} sh -c 'git push'",
+            "bash -euo pipefail -c 'git push'",     # 不去记 shell 的哪些选项带值
+            "bash -x -euo pipefail -c 'git push'",
+            "bash -co pipefail 'git push'",
+            "bash --rcfile /dev/null -c 'git push'",
+            "sh /dev/fd/0 <<'EOF'\ngit push\nEOF",
+            ". /dev/stdin <<'EOF'\ngit push\nEOF",
+            "source /dev/stdin <<< 'git push'",
             "trap 'git push' EXIT",
             "alias p='git push'\np",
             "emulate sh -c 'git push'",
@@ -478,6 +498,18 @@ class ShipWords(unittest.TestCase):
             "() {git push}",
             "=git push",                            # zsh：=git 是 git 的完整路径
             "=gh pr create --fill",
+            "echo ${x:- #}; git push",              # ${ } 里的 # 不是注释
+            "echo ${x:-<<EOF}\ngit push\nEOF",      # ${ } 里的 << 不是 heredoc
+            "echo $[ 1 << EOF ]\ngit push\nEOF",    # 旧式算术里的 << 是移位
+            "a[1<<EOF]=5\ngit push\nEOF",           # 数组下标里的 << 是移位
+            "a[1 << EOF ]=5\ngit push\nEOF",
+            "x=a; [[ $x =~ ( #) ]]; git push",      # [[ ]] 里的 # 不是注释
+            '"gi\\\nt" push',                        # 双引号里反斜杠加换行是续行
+            'git "pu\\\nsh"',
+            "cat <<EOF\r\nx\r\nEOF\r\ngit push",   # 回车不是空白：结束符是 EOF\r
+            "cat <<EOF}\nx\nEOF}\ngit push\nEOF",   # 结束符是 EOF}
+            "cat <<EOF\nx\ngit push",               # 一直没等到结束符
+            "{git,pu''sh}",                         # 去掉引号才是 push
         )
         self.not_ship(
             "cat <<'EOF'\n$(git push)\nEOF",      # 结束符加了引号：正文原样，不执行
@@ -599,10 +631,10 @@ class GuardCase(unittest.TestCase):
         return sha
 
     def reviewed(self, repo, branch, base="main"):
-        """像 review.py 通过时那样记一个审核单元：base..branch 这一段，顶端是 branch。返回这一段的提交号。"""
+        """像 review.py 通过时那样记一个审核单元：从 base 和 branch 的分叉点到 branch 的顶端。返回这一段的提交号。"""
         tip = self.git(repo, "rev-parse", branch)
         shas = self.git(repo, "rev-list", f"{base}..{branch}").split()
-        records.add_unit(repo, tip, shas, self.git(repo, "rev-parse", base))
+        records.add_unit(repo, tip, self.git(repo, "merge-base", base, branch), shas)
         return shas
 
     def write(self, path, text=""):
@@ -864,6 +896,62 @@ class ReviewUnitTest(GuardCase):
         self.git(self.repo, "merge", "-q", "--ff-only", "feat")
         self.allow(self.repo, "git push")
 
+    def test_单元的起点必须是已经通过的状态_两个单元不能这样拼(self):
+        # 独立审核发现的：A 加坏文件，B 撤销（整段没改动，记单元 起点 main → 顶端 B）；
+        # C 再撤销 B（内容回到 A）。从 A 审到 C 也是没改动（记单元 起点 A → 顶端 C）。
+        # 两个单元把 A、B、C 都盖住了，但 A 这个起点从来没通过过，最终内容里有坏文件。
+        self.git(self.repo, "checkout", "-q", "-b", "feat")
+        a = self.change(self.repo, "bad.txt", "坏\n", "A")
+        self.git(self.repo, "rm", "-q", "bad.txt")
+        self.git(self.repo, "commit", "-q", "-m", "B：撤销 A")
+        self.reviewed(self.repo, "feat", "main")
+        self.change(self.repo, "bad.txt", "坏\n", "C：撤销 B")
+        self.reviewed(self.repo, "feat", a)
+        self.git(self.repo, "checkout", "-q", "main")
+        msg = self.deny(self.repo, "git merge feat", "有 1 个提交还没通过 Codex 审核")
+        self.assertIn("起点是个还没通过审核的状态", msg)
+        self.deny(self.repo, "git push -u origin feat", "还没通过 Codex 审核")
+        # 从已经通过的状态（main）把整段重审一次才行
+        self.reviewed(self.repo, "feat", "main")
+        self.allow(self.repo, "git merge feat")
+
+    def test_单元可以一环扣一环_起点是另一个单元的顶端(self):
+        self.commit(self.repo, "feat")
+        self.reviewed(self.repo, "feat", "main")
+        first = self.git(self.repo, "rev-parse", "feat")
+        self.commit(self.repo, "feat")
+        self.reviewed(self.repo, "feat", first)  # 只审新加的那个提交：起点是上一个单元的顶端
+        self.allow(self.repo, "git merge feat")
+        # 在合并提交后面接着做的任务分支：起点是那个（干净的）合并提交
+        self.change(self.repo, "main.txt", "1\n")
+        self.reviewed(self.repo, "main", "main~1")
+        self.git(self.repo, "merge", "-q", "--no-ff", "feat", "-m", "merge feat")
+        self.git(self.repo, "checkout", "-q", "-b", "next")
+        self.change(self.repo, "next.txt", "1\n")
+        self.git(self.repo, "checkout", "-q", "main")
+        self.reviewed(self.repo, "next", "main")
+        self.allow(self.repo, "git merge next")
+        self.allow(self.repo, "git push -u origin next")
+        self.git(self.repo, "merge", "-q", "--ff-only", "next")
+        self.allow(self.repo, "git push")
+
+    def test_回滚一个没上传的撤销提交_不会让坏内容通过(self):
+        # 独立审核发现的：A 加坏文件、B 撤销（记单元）。再用 rollback.py 撤回 B，内容回到 A。
+        # 回滚记的单元起点是 A（B 之前），A 没通过，所以不算数。
+        self.git(self.repo, "checkout", "-q", "-b", "feat")
+        self.change(self.repo, "bad.txt", "坏\n", "A")
+        self.git(self.repo, "rm", "-q", "bad.txt")
+        self.git(self.repo, "commit", "-q", "-m", "B：撤销 A")
+        self.reviewed(self.repo, "feat", "main")
+        b = self.git(self.repo, "rev-parse", "HEAD")
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "rollback.py"), "--cwd", self.repo, "--commits", b],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(os.path.exists(os.path.join(self.repo, "bad.txt")))
+        self.git(self.repo, "checkout", "-q", "main")
+        self.deny(self.repo, "git merge feat", "还没通过 Codex 审核")
+        self.deny(self.repo, "git push -u origin feat", "还没通过 Codex 审核")
+
     def test_单元顶端之后又加了提交_新加的要审(self):
         self.commit(self.repo, "feat")
         self.commit(self.repo, "feat")
@@ -917,8 +1005,8 @@ class ReviewUnitTest(GuardCase):
         self.git(self.repo, "checkout", "-q", "main")
         self.reviewed(self.repo, "feat")
         self.allow(self.repo, "git merge feat")
-        main_new = self.change(self.repo, "main.txt", "1\n")
-        records.add_unit(self.repo, main_new, [main_new])
+        self.change(self.repo, "main.txt", "1\n")
+        self.reviewed(self.repo, "main", "main~1")
         self.git(self.repo, "rebase", "-q", "main", "feat")
         self.git(self.repo, "checkout", "-q", "main")
         self.deny(self.repo, "git merge feat", "有 1 个提交")
@@ -948,8 +1036,8 @@ class ReviewUnitTest(GuardCase):
         self.change(self.repo, "a.txt", "feat\n")
         self.git(self.repo, "checkout", "-q", "main")
         self.reviewed(self.repo, "feat")
-        m = self.change(self.repo, "a.txt", "main\n")
-        records.add_unit(self.repo, m, [m])
+        self.change(self.repo, "a.txt", "main\n")
+        self.reviewed(self.repo, "main", "main~1")
         subprocess.run(["git", "merge", "feat"], cwd=self.repo, capture_output=True)  # 冲突
         self.write(os.path.join(self.repo, "a.txt"), "解冲突时写进来的新内容\n")
         self.git(self.repo, "add", "-A")
@@ -1067,6 +1155,8 @@ class UploadGateTest(GuardCase):
                 ("git merge", "一次合并一个分支"),
                 ("git merge feat~0", "一次合并一个分支"),
                 ("git merge feat^", "一次合并一个分支"),
+                ("git merge FETCH_HEAD", "一次合并一个分支"),   # 会把 FETCH_HEAD 里记的几个头一起合进来
+                ("git merge ORIG_HEAD", "一次合并一个分支"),
                 ("git merge 'feat x'", "一次合并一个分支"),
                 ("git merge 不存在的分支", "找不到分支"),
         ):
@@ -1126,7 +1216,8 @@ class UploadGateTest(GuardCase):
                     "git push origin 'refs/heads/*:refs/heads/*'", "git push origin main feat",
                     "git push origin main:main feat:feat", "git push origin main:refs/tags/v2",
                     "git push origin main:", "git push origin main:a:b", "git push origin main~0:main",
-                    "git push origin HEAD:HEAD"):
+                    "git push origin HEAD:HEAD", "git push origin feat:heads/main", "git push origin feat:tags/v9",
+                    "git push origin feat:remotes/origin/main", "git push origin main:FETCH_HEAD"):
             self.deny(self.repo, cmd, "只认这几种写法")
         for cmd in ("git push origin v1", "git push origin v1:main", "git push origin refs/remotes/origin/main:main",
                     f"git push origin {tag}:main"):
@@ -1346,8 +1437,10 @@ class UploadGateTest(GuardCase):
 
     def test_gh_pr_merge和gh_api的写操作_负责人不用(self):
         self.all_reviewed()
-        for cmd in ("gh pr merge 12 --squash", "gh pr merge", "gh -R o/r pr merge 1"):
+        for cmd in ("gh pr merge 12 --squash", "gh pr merge", "gh -R o/r pr merge 1", "gh pr --repo o/r merge 1"):
             self.deny(self.repo, cmd, "不用 gh pr merge")
+        for cmd in ("gh pr new --fill", "gh pr -R o/r create --fill", "gh repo create o/r --source . --push"):
+            self.deny(self.repo, cmd, "请单独运行")
         for cmd in ("gh api -X PUT repos/o/r/pulls/1/merge", "gh api repos/o/r/git/refs/heads/main -X PATCH -f sha=abc",
                     "gh api repos/o/r/contents/a.txt -f message=m", "gh api graphql -f query=x"):
             self.deny(self.repo, cmd, "gh api 的写操作")
@@ -1455,7 +1548,8 @@ class SemiAutoTest(GuardCase):
         self.allow(self.repo, "git push")
 
     def test_半自动下用gh合并PR一律拦(self):
-        for cmd in ("gh pr merge 123 --squash", "gh pr merge", "rtk proxy gh pr merge 1",
+        self.deny(self.repo, "git push origin feat:heads/main")  # heads/main 就是主分支
+        for cmd in ("gh pr merge 123 --squash", "gh pr merge", "rtk proxy gh pr merge 1", "gh pr --repo o/r merge 1 --squash",
                     "gh api -X PUT repos/o/r/pulls/1/merge", "bash -c 'gh pr merge 1'", "cd / && gh pr merge 1"):
             self.deny(self.repo, cmd, "用户自己点合并")
             self.deny(self.repo, cmd, "用户自己点合并", env={"AGENT_DEV_TEAM_CODEX": "off"})

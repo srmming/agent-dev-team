@@ -23,7 +23,8 @@ VERDICTS = {"VERDICT: PASS": "PASS", "VERDICT: FAIL": "FAIL"}
 def verdicts_in(out):
     """输出里的结论：整行只有 VERDICT: PASS 或 VERDICT: FAIL（首尾可以有空白）才算，按出现顺序返回。
     行里还有别的字（引用提示词、加粗、举例）都不算。"""
-    return [VERDICTS[ln.strip()] for ln in out.splitlines() if ln.strip() in VERDICTS]
+    lines = [ln.strip(" \t\r") for ln in out.split("\n")]  # 只按换行切：别的分隔符（换页符等）不算一行的开头结尾
+    return [VERDICTS[ln] for ln in lines if ln in VERDICTS]
 
 
 def default_branch(cwd):
@@ -92,14 +93,15 @@ def main(argv=None):
     if trees[0] == trees[1]:
         if commits:
             # 有提交但合起来没改任何文件（空提交、改了又撤销）：没什么可审，记成一个审核单元，免得守卫一直拦。
-            # 单元只证明整段一起上没问题：只上传其中一部分（只推「改了」不推「撤销」）守卫照样拦。
-            records.add_unit(cwd, branch_sha, commits, base_sha)
+            # 单元只证明「起点没问题的话顶端也没问题」：只上传其中一部分（只推「改了」不推「撤销」），
+            # 或者起点本身是个没审过的状态，守卫照样拦。
+            records.add_unit(cwd, branch_sha, fork, commits)
             records.clear_fails(cwd, a.branch)
             print(f"审核：没有改动\n{len(commits)} 个提交合起来没有改任何文件，已记为通过（要整段一起上传）。")
         else:
             print("审核：没有改动")
         return 0
-    rng = f"{base_sha}...{branch_sha}"
+    rng = f"{fork}..{branch_sha}"  # 和 base...branch 是同一段改动，写成两个确定的提交号
 
     cmd_text = review_cmd(root)
     try:
@@ -131,7 +133,7 @@ def main(argv=None):
     out = r.stdout or ""
     verdicts = verdicts_in(out)  # 取最后一个整行结论
     if verdicts and verdicts[-1] == "PASS":
-        records.add_unit(cwd, branch_sha, commits, base_sha)  # 开跑前固定的那一段
+        records.add_unit(cwd, branch_sha, fork, commits)  # 开跑前固定的那一段：从分叉点到分支顶端
         records.clear_fails(cwd, a.branch)
         print("审核：通过")
         return 0

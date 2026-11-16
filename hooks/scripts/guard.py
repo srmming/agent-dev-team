@@ -80,9 +80,26 @@ def block(msg):
 
 # ---------- 拆命令 ----------
 
-def _match_paren(s, i):
-    """s[i] 是左括号，返回和它配对的右括号的位置。引号里的括号不算。"""
-    depth, n = 0, len(s)
+HEREDOC_RE = re.compile(r"""<<(-?)[ \t]*((?:[^\s;&|()<>'"\\]|\\.|'[^']*'|"[^"]*")+)""")
+PLAIN_DELIM_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _heredoc_body(s, i, delim, strip_tabs):
+    """s[i] 是换行后的第一个字。返回 (heredoc 的正文, 结束符那一行之后的位置, 有没有等到结束符)。"""
+    n, start = len(s), i
+    while i < n:
+        j = s.find("\n", i)
+        line, nxt = s[i:n if j < 0 else j], n if j < 0 else j + 1
+        if (line.lstrip("\t") if strip_tabs else line) == delim:
+            return s[start:max(i - 1, start)], nxt, True
+        i = nxt
+    return s[start:], n, False
+
+
+def _match_paren(s, i, pair="()"):
+    """s[i] 是左括号（pair 可以换成 {} 或 []），返回和它配对的右括号的位置。引号里的括号不算；
+    里面开的 heredoc 的正文也不算（git commit -m "$(cat <<'EOF' ... EOF)" 的正文里常有撇号和括号）。"""
+    depth, n, docs = 0, len(s), []
     while i < n:
         c = s[i]
         if c == "\\":
@@ -102,9 +119,21 @@ def _match_paren(s, i):
                 break
             i = j + 1
             continue
-        if c == "(":
+        if c == "<" and s.startswith("<<", i) and not s.startswith("<<<", i):
+            m = HEREDOC_RE.match(s, i)
+            if m:
+                docs.append((re.sub(r"""\\(.)|['"]""", r"\1", m.group(2)), bool(m.group(1))))
+                i = m.end()
+                continue
+        if c == "\n" and docs:
+            i += 1
+            for delim, strip_tabs in docs:
+                i = _heredoc_body(s, i, delim, strip_tabs)[1]
+            docs = []
+            continue
+        if c == pair[0]:
             depth += 1
-        elif c == ")":
+        elif c == pair[1]:
             depth -= 1
             if depth == 0:
                 return i
@@ -205,11 +234,12 @@ class Word(str):
 
 def tokenize(cmd):
     """把命令拆成 (类型, 文本) 列表：w = 词，o = 引号外的操作符，s = 套在里面、要另外检查的命令，
-    h = heredoc 的正文。引号里的 | ; > 等只算词的一部分，不算操作符。注释直接跳过。
-    引号、括号没闭合时抛 ValueError。"""
+    h = heredoc 的正文，m = 可能是正文也可能是命令的几行（见下面 heredoc 那段）。
+    引号里的 | ; > 等只算词的一部分，不算操作符。注释直接跳过。引号、括号没闭合时抛 ValueError。"""
     toks, buf, mask, has, quoted, i, n = [], [], [], False, False, 0, len(cmd)
     heredocs, want = [], None  # 等着读正文的 heredoc；刚看到 << 还没读到结束符
-    parens = braces = 0  # 现在在几层括号里；当前这个词里还没配上对的 { 有几个
+    parens = braces = squares = 0  # 在几层括号里；当前这个词里没配对的 { 有几个；这条命令里没配对的 [ 有几个
+    cond = False  # 在 [[ ... ]] 里：里面的 # 不是注释
 
     def put(text, live="q"):
         """往当前这个词里加一段。live：这一段里 shell 还会展开的字（没有就是 q）。"""
@@ -219,15 +249,23 @@ def tokenize(cmd):
         has = True
 
     def flush():
-        nonlocal buf, mask, has, quoted, want, braces
+        nonlocal buf, mask, has, quoted, want, braces, cond
         if has:
             word = Word("".join(buf))
             word.dyn = bool(DYN_RE.search("".join(mask)))
             toks.append(("w", word))
+            cond = word == "[[" or (cond and word != "]]")
             if want is not None:
-                heredocs.append((word, quoted) + want)
+                # 结束符长得不像结束符（EOF]=5、2）：多半不是真的 heredoc，后面几行按「可能是命令」算
+                heredocs.append((word, quoted, want[0], want[1] or not PLAIN_DELIM_RE.match(word)))
                 want = None
         buf, mask, has, quoted, braces = [], [], False, False, 0
+
+    def span(start, end, inner):
+        """${...}、$[...]、$( )：整段算进当前这个词，里面套着的命令另外查。"""
+        toks.extend(("s", t) for t in inner)
+        put(cmd[start:end + 1], "$")
+        return end + 1
 
     while i < n:
         c = cmd[i]
@@ -257,18 +295,18 @@ def tokenize(cmd):
             j = i + 1
             while j < n and cmd[j] != '"':
                 if cmd[j] == "\\" and j + 1 < n:
-                    put(cmd[j + 1])
+                    if cmd[j + 1] != "\n":  # 双引号里反斜杠加换行也是续行："gi\<换行>t" 就是 git
+                        put(cmd[j + 1])
                     j += 2
                 elif cmd[j] == "`":
                     k = _close_backtick(cmd, j)
-                    toks.append(("s", _backtick_text(cmd, j, k)))
-                    put(cmd[j:k + 1], "$")
-                    j = k + 1
+                    j = span(j, k, [_backtick_text(cmd, j, k)])
                 elif cmd.startswith("$(", j):
                     k = _match_paren(cmd, j + 1)
-                    toks += [("s", t) for t in _paren_scripts(cmd, j + 1, k)]
-                    put(cmd[j:k + 1], "$")
-                    j = k + 1
+                    j = span(j, k, _paren_scripts(cmd, j + 1, k))
+                elif cmd.startswith("${", j):
+                    k = _match_paren(cmd, j + 1, "{}")
+                    j = span(j, k, _subs(cmd[j + 2:k]))
                 else:
                     put(cmd[j], "$" if cmd[j] == "$" else "q")  # 双引号里只有 $ 还会展开
                     j += 1
@@ -278,52 +316,46 @@ def tokenize(cmd):
             i = j + 1
         elif c == "`":
             k = _close_backtick(cmd, i)
-            toks.append(("s", _backtick_text(cmd, i, k)))
-            put(cmd[i:k + 1], "$")
-            i = k + 1
+            i = span(i, k, [_backtick_text(cmd, i, k)])
         elif cmd.startswith("$(", i):
-            # 命令替换或算术 $(( ))：整段算进当前这个词（"$(brew --prefix)/bin/x" 是一个词），里面的命令另外查
+            # 命令替换或算术 $(( ))："$(brew --prefix)/bin/x" 是一个词
             k = _match_paren(cmd, i + 1)
-            toks += [("s", t) for t in _paren_scripts(cmd, i + 1, k)]
-            put(cmd[i:k + 1], "$")
-            i = k + 1
+            i = span(i, k, _paren_scripts(cmd, i + 1, k))
+        elif cmd.startswith("${", i) or cmd.startswith("$[", i):
+            # 参数展开、旧式算术：里面的 # 不是注释，<< 不是 heredoc
+            k = _match_paren(cmd, i + 1, "{}" if cmd[i + 1] == "{" else "[]")
+            i = span(i, k, _subs(cmd[i + 2:k]))
         elif arith is not None:
             # 算术 (( ))：里面的 > < 不是重定向，整段当成一个词；里面套着的 $( ) 照样要查
-            toks += [("s", t) for t in _subs(cmd[i + 2:arith - 1])]
-            put(cmd[i:arith + 1], "$")
-            i = arith + 1
-        elif c == "#" and not has:  # 注释，跳到行尾
+            i = span(i, arith, _subs(cmd[i + 2:arith - 1]))
+        elif c == "#" and not has and not cond:  # 注释，跳到行尾
             j = cmd.find("\n", i)
             i = n if j < 0 else j
-        elif c in " \t\r":
+        elif c in " \t":
             flush()
             i += 1
         elif c == "\n":
             flush()
             toks.append(("o", c))
+            squares = 0
             i += 1
-            while heredocs:  # heredoc 正文单独成一个 h 记号：只有喂给 shell 时才当命令查
-                delim, literal, strip_tabs, in_parens = heredocs.pop(0)
-                body = []
-                while i < n:
-                    j = cmd.find("\n", i)
-                    line = cmd[i:n if j < 0 else j]
-                    i = n if j < 0 else j + 1
-                    if (line.lstrip("\t") if strip_tabs else line) == delim:
-                        break
-                    body.append(line)
-                text = "\n".join(body)
+            while heredocs:
+                # heredoc 的正文单独成一个 h 记号：只有喂给 shell 时才当命令查。
+                # 但有几种情况，真 shell 可能根本不把这几行当正文，而是当命令执行（m 记号，两种都算）：
+                # 在括号里开的（zsh 里 $(cat <<EOF) 后面几行会被执行）、结束符长得不像结束符的、
+                # 前面有没配对的 [ 的（a[1 << EOF]=5 是数组下标里的移位）、一直读到结尾都没等到结束符的。
+                delim, literal, strip_tabs, doubtful = heredocs.pop(0)
+                text, i, closed = _heredoc_body(cmd, i, delim, strip_tabs)
                 toks.append(("h", text))
-                if in_parens:
-                    # 在括号里开的 heredoc：bash 把后面几行当正文，zsh 里 $(cat <<EOF) 后面几行会被当命令执行。
-                    # 两种都算：既当正文，也当命令查
-                    toks.append(("s", text))
+                if doubtful or not closed:
+                    toks.append(("m", text))
                 elif not literal:  # 结束符没加引号：正文里的 $( ) 和反引号会被执行
-                    toks += [("s", t) for t in _subs(text)]
+                    toks.extend(("s", t) for t in _subs(text))
         elif c in "()":
             flush()
             toks.append(("o", c))
             parens = max(parens + (1 if c == "(" else -1), 0)
+            squares = 0
             i += 1
         elif c in ";|&<>":
             op = next(o for o in OPERATORS if cmd.startswith(o, i))
@@ -333,16 +365,19 @@ def tokenize(cmd):
             toks.append(("o", op))
             i += len(op)
             if op in ("<<", "<<-"):
-                want = (op == "<<-", parens > 0)
+                want = (op == "<<-", parens > 0 or squares > 0)
+            elif op[0] not in "<>":
+                squares = 0  # 一条命令结束
         elif c == "{" and not has and not _brace_word(cmd, i):
             toks.append(("w", "{"))  # zsh 里 {git push} 不用空格：{ 单独算一个词
             i += 1
-        elif c == "}" and has and not braces:
+        elif c == "}" and has and not braces and want is None:
             flush()  # push} 拆成 push 和 }
             toks.append(("w", "}"))
             i += 1
         else:
             braces += (c == "{") - (c == "}" and braces > 0)
+            squares = max(squares + (c == "[") - (c == "]"), 0)
             put(c, c)  # 引号外的字：$ * ? [ ] { } 都可能被展开
             i += 1
     flush()
@@ -376,6 +411,15 @@ def parse(cmd, depth=0):
         elif kind == "h":
             if pending:
                 pending.pop(0)[1].append(text)
+            i += 1
+        elif kind == "m":
+            try:  # 可能是命令的几行：拆得开就当命令查
+                sub, sub_writes = parse(text, depth + 1)
+                nested += sub
+                writes = writes or sub_writes
+            except ValueError:
+                if SHIP_HINT.search(text):
+                    raise  # 拆不开，里面又有 push / merge 这类词：整条命令按看不懂算
             i += 1
         elif cond and text in ("<", ">", "&&", "||", "(", ")"):
             i += 1  # [[ a > b && c ]] 里是比较和逻辑运算，不是重定向
@@ -467,38 +511,34 @@ def cmd_name(word):
 
 def scripts_in(words, bodies):
     """这段命令里交给 shell 再跑一遍的文字：bash / sh -c "..."、eval "..."、trap "..." 信号、alias 名字="..."、
-    喂给 shell 的 heredoc。这几个词不管出现在第几个词都认（前面可能有守卫不认识的包装器）。
+    喂给 shell 或 source 的 heredoc。这几个词不管出现在第几个词都认（前面可能有守卫不认识的包装器）。
     返回 (脚本文字列表, 有没有 shell 从标准输入读命令而守卫看不到内容)。"""
     out, blind, seen_eval = [], False, False
     for i, w in enumerate(words):
-        base = cmd_name(w)
+        base, args = cmd_name(w), words[i + 1:]
         if base == "eval" and not seen_eval:
             # 只取第一个 eval：它的文字已经包住后面的了（eval eval eval ... 每个都取会越拆越多）
-            out.append(" ".join(words[i + 1:]))
+            out.append(" ".join(args))
             seen_eval = True
         elif base == "trap":
-            out += [a for a in words[i + 1:] if not a.startswith("-")][:1]
+            out += [a for a in args if not a.startswith("-")][:1]
         elif base == "alias":
-            out += [a.split("=", 1)[1] for a in words[i + 1:] if "=" in a]
+            out += [a.split("=", 1)[1] for a in args if "=" in a]
+        elif base in ("source", "."):
+            out += bodies  # source /dev/stdin <<EOF
         if base not in SHELLS:
             continue
-        args, want_c = words[i + 1:], False
-        while args:
-            a = args[0]
-            if a in ("-o", "+o", "-O", "+O"):
-                args = args[2:]
-            elif a.startswith("-") and not a.startswith("--") and len(a) > 1:
-                want_c = want_c or "c" in a[1:]
-                args = args[1:]
-            elif a.startswith("--") or a.startswith("+"):
-                args = args[1:]
-            else:
-                break
-        if want_c:
-            out += args[:1]
-        elif not args or args[0] in ("-", "/dev/stdin"):  # 没给脚本文件：从标准输入读命令
-            out += bodies
-            blind = blind or not bodies
+        # 不去记 shell 的哪些选项带值（bash -euo pipefail -c '...'、bash --rcfile x -c '...'）：
+        # 有 -c 的话，它后面每个不是选项的词都当脚本查一遍
+        c_at = next((k for k, a in enumerate(args) if a.startswith("-") and not a.startswith("--") and "c" in a), None)
+        if c_at is not None:
+            out += [a for a in args[c_at + 1:] if not a.startswith(("-", "+"))]
+            continue
+        out += bodies  # 没有 -c：喂给它的 heredoc / here-string 就是命令（sh <<EOF、sh /dev/stdin <<EOF）
+        # 没喂东西，后面又没有明确的脚本文件（每个词都可能只是前一个选项的值）：从标准输入读命令，守卫看不到
+        files = [a for k, a in enumerate(args) if not a.startswith(("-", "+"))
+                 and not (k and args[k - 1].startswith(("-", "+"))) and a not in ("-", "/dev/stdin", "/dev/fd/0")]
+        blind = blind or not (bodies or files)
     return out, blind
 
 
@@ -683,21 +723,35 @@ def gh_api_writes(args):
 
 
 def gh_ship(words):
-    """把 words[0] 当成 gh。返回 pr-create / pr-merge / api（gh api 的写操作）/ "?"（子命令是变量）/ None。"""
+    """把 words[0] 当成 gh。返回 pr-create / pr-merge / api（gh api 的写操作）/ gh-push / "?"（子命令是变量）/ None。
+    和 git 一样不去记哪些选项带值：gh pr -R o/r create 里，-R 后面的词可能是值也可能是子命令，两种都算。"""
     rest = words[1:]
-    for i, w in enumerate(rest[:-1]):
-        if w == "pr" and rest[i + 1] in ("create", "merge"):
-            return "pr-" + rest[i + 1]
+    for i, w in enumerate(rest):
+        if w != "pr":
+            continue
+        k = i + 1
+        while k < len(rest):
+            a = rest[k]
+            if not a.startswith("-"):
+                if a in ("create", "new", "merge"):  # new 是 create 的别名
+                    return "pr-merge" if a == "merge" else "pr-create"
+                if _dyn(a):
+                    return "?"
+                if not (rest[k - 1].startswith("-") and "=" not in rest[k - 1]):
+                    break  # 前面不是「可能带值的选项」：a 确实是子命令，而且不是上传
+            k += 1
+    if "repo" in rest and "create" in rest and any(a == "--push" or a.startswith("--push=") for a in rest):
+        return "gh-push"
     first = next((i for i, w in enumerate(rest) if not w.startswith("-")), len(rest))
     if rest[first:first + 1] == ["api"]:
         return "api" if gh_api_writes(rest[:first] + rest[first + 1:]) else None
-    if any(_dyn(w) for w in rest[:2]):
+    if any(_dyn(w) for w in rest[:1]):
         return "?"
     return None
 
 
 def scan_ship(cmd):
-    """这条命令里有没有上传动作。返回 (种类的集合, 有没有看不懂的地方)。
+    """这条命令里有没有上传动作。返回 (种类的集合, 是不是「看不懂，又出现了 push / merge 这类词」)。
     git / gh 不管出现在一段命令的第几个词都认，所以不靠包装器名单（timeout 30 git push、
     没见过的包装器 git push 都认得出）；代价是 echo git push 这种也算。
     变量、花括号展开当命令名时，把它当成 git 和 gh 各试一次（$GIT push）。
@@ -728,17 +782,19 @@ def scan_ship(cmd):
                         # xargs git、xargs -I% git %：子命令是别的程序拼出来的。
                         # git branch --merged | xargs git branch -d 这种子命令写明了的不算
                         subs = [git_parts(words[i:])[0]] if name == "git" else words[i + 1:i + 3]
-                        if kind == "" and i > 0 or fed and not all(PLAIN_RE.match(s) for s in subs):
+                        if fed and not (subs and all(PLAIN_RE.match(s) for s in subs)):
                             unknown = True
-        return kinds, unknown
+        # 这些词在原文里找，也在去掉引号之后的词里找（{git,pu''sh} 去掉引号才是 push）
+        hint = SHIP_HINT.search(cmd) or any(SHIP_HINT.search(w) for seg in segs for w in seg)
+        return kinds, bool(unknown and hint)
     except Exception:
-        return set(), True
+        return set(), bool(SHIP_HINT.search(cmd))  # 拆不开、守卫自己出错：都算看不懂
 
 
 def may_ship(cmd):
     """子代理、对接窗口用：命令里可能有上传动作。"""
     kinds, unknown = scan_ship(cmd)
-    return bool(kinds) or (unknown and bool(SHIP_HINT.search(cmd)))
+    return bool(kinds) or unknown
 
 
 # ---------- 上传动作：第二步，负责人的上传关（只认最简单的写法，其余一律拦） ----------
@@ -772,8 +828,10 @@ CANT_CHECK = "守卫查不出这次要{what}哪些提交，不能放行。"
 
 
 def _ref_ok(name):
-    """分支名只认最普通的写法：字母、数字、. / @ - _，不以 - 开头。带 ^ ~ : + * 空格的一律看不懂。"""
-    return bool(REF_RE.match(name)) and not name.startswith("-") and ".." not in name
+    """分支名只认最普通的写法：字母、数字、. / @ - _，不以 - 开头。带 ^ ~ : + * 空格的一律看不懂。
+    FETCH_HEAD、MERGE_HEAD 这类特殊名字也不认（git merge FETCH_HEAD 会把里面记的几个头一起合进来）。"""
+    return (bool(REF_RE.match(name)) and not name.startswith("-") and ".." not in name
+            and not name.endswith("HEAD"))
 
 
 def rev(cwd, ref):
@@ -935,7 +993,9 @@ def push_plan(cwd, args):
         return f"`{remote}` 不是这个仓库配置的远端（不能直接推到网址或路径）。" + PUSH_HELP
     src = src[len("refs/heads/"):] if src.startswith("refs/heads/") else src
     dst = dst[len("refs/heads/"):] if dst.startswith("refs/heads/") else dst
-    if not _ref_ok(src) or not _ref_ok(dst) or dst == "HEAD" or dst.startswith("refs/"):
+    # heads/main 会被 git 认成 refs/heads/main，tags/x、remotes/x 同理：这些开头的一律不认
+    odd = dst.split("/")[0] in ("refs", "heads", "tags", "remotes")
+    if not (src == "HEAD" or _ref_ok(src)) or not _ref_ok(dst) or odd:
         return ("守卫看不懂要推的分支（`:`、`+`、通配符、删除远端分支、推标签这类都不认；"
                 "游离的 HEAD 要写明推到哪个远端分支）。" + PUSH_HELP)
     tip = rev(cwd, "HEAD" if src == "HEAD" else "refs/heads/" + src)
@@ -970,7 +1030,7 @@ def pr_plan(cwd, args):
     base = opts.get("--base") or default_branch(cwd)
     if head is None:
         head = current_branch(cwd)
-    if not head or head == "HEAD" or not _ref_ok(head):
+    if not head or not _ref_ok(head):
         return "守卫看不出这个 PR 的 head 分支（要是本地的一个分支，不带「用户名:」）。" + PR_HELP
     tip = rev(cwd, "refs/heads/" + head)
     if not tip:
@@ -986,7 +1046,7 @@ def pr_plan(cwd, args):
 
 def clean_merge(cwd, sha):
     """合并提交的内容是不是两边自动合出来的（没夹带别的改动）。判断不了（章鱼合并、git 太旧）按不是处理。"""
-    parents = (git(cwd, "rev-list", "--parents", "-n", "1", sha) or "").split()[1:]
+    parents = (git(cwd, "rev-list", "--parents", "-n", "1", sha, "--") or "").split()[1:]
     if len(parents) != 2:
         return False
     try:
@@ -1001,26 +1061,36 @@ def clean_merge(cwd, sha):
 def uncovered(cwd, rng):
     """范围里还不能上传的提交。git 查不出来时返回 None（调用的地方要拦，不能当成通过）。
 
-    一个审核单元 = 一次通过的审核 = {顶端提交, 这一段的全部提交}，只证明「整段一起上」没问题。
-    所以单元的顶端提交也在这次上传里，它的提交才算数；只带了某个单元的一部分（比如只推「引入问题」
-    的提交，不推后面「撤销」的提交），那部分不算。
-    另外，两边自动合出来、没夹带改动的合并提交不用审。"""
-    revs = git(cwd, "rev-list", rng, "--")
-    if revs is None:
+    一个审核单元 = 一次通过的审核 = {起点, 顶端}：Codex 看过从起点到顶端这一整段的最终结果。
+    所以它只证明一件事：起点那个状态没问题的话，顶端那个状态也没问题。
+    一个提交的状态算「通过」，有三种情况：
+      1. 它不在这次上传里（远端 / 当前分支已经有了）；
+      2. 它是某个单元的顶端，而且那个单元的起点也算通过；
+      3. 它是两边自动合出来、没夹带改动的合并提交，而且两边都算通过。
+    通过的提交和它前面的提交都可以上传，其余的不行。这样：只带了某个单元的一部分（只推「引入问题」
+    的提交，不推后面「撤销」的提交）不行；单元的起点是个没人审过的中间状态（先审 A→B，再从 A 审到 C）也不行。"""
+    out = git(cwd, "rev-list", "--topo-order", "--reverse", "--parents", rng, "--")
+    if out is None:
         return None
-    todo = revs.split()
-    uploading, ok = set(todo), set()
+    parents = {ln.split()[0]: ln.split()[1:] for ln in out.splitlines() if ln.strip()}
+    order = list(parents)  # 从旧到新，父提交排在前面
+    forks = {}
     for u in records.units(cwd):
-        if u["tip"] in uploading:
-            ok |= u["commits"]
-    rest = [s for s in todo if s not in ok]
-    if not rest:
-        return []
-    merges = git(cwd, "rev-list", "--merges", rng, "--")
-    if merges is None:
-        return None
-    merges = set(merges.split())
-    return [s for s in rest if not (s in merges and clean_merge(cwd, s))]
+        forks.setdefault(u["tip"], []).append(u["fork"])
+    passed = {}
+
+    def ok(c):
+        return passed.get(c, c not in parents)
+
+    for c in order:
+        passed[c] = (any(ok(f) for f in forks.get(c, []))
+                     or len(parents[c]) > 1 and all(ok(p) for p in parents[c]) and clean_merge(cwd, c))
+    fine = set()
+    for c in reversed(order):  # 通过的提交，连同它前面的提交，都可以上传
+        if passed[c] or c in fine:
+            fine.add(c)
+            fine.update(parents[c])
+    return [c for c in reversed(order) if c not in fine]
 
 
 def review_msg(cwd, plan, missing):
@@ -1032,8 +1102,9 @@ def review_msg(cwd, plan, missing):
     )
     reviewed = set().union(*(u["commits"] for u in records.units(cwd)))
     if any(s in reviewed for s in missing):
-        msg += ("\n注意：其中有提交审核过，但那次审核的最后一个提交不在这次上传里。"
-                "审核看的是整段的最终结果，不能只上传其中一部分。")
+        msg += ("\n注意：其中有提交审核过，但那次审核在这里不算数：它的最后一个提交不在这次上传里，"
+                "或者它的起点是个还没通过审核的状态。审核看的是从起点到顶端整段的最终结果，"
+                "不能只上传其中一部分。把要上传的分支整个重审一次。")
     if records.has_legacy(cwd):
         msg += "\n旧格式的审核记录（passed 文件）已经作废，以前通过的提交也要重新审核。"
     return msg
@@ -1079,7 +1150,7 @@ def check_upload(cwd, cmd, kinds, semi, codex_off):
 def check_ship(cwd, cmd, auto):
     """负责人的上传关和半自动限制。返回拦截原因或 None。"""
     kinds, unknown = scan_ship(cmd)
-    if not kinds and not (unknown and SHIP_HINT.search(cmd)):
+    if not kinds and not unknown:
         return None  # 不是上传命令
     semi = auto == "semi"
     codex_off = os.environ.get("AGENT_DEV_TEAM_CODEX", "").lower() == "off"

@@ -165,6 +165,7 @@ class Review(RepoCase):
         self.assertEqual(len(shas), 2)
         # 记成一个审核单元：顶端是分支顶端，里面是这一段的全部提交
         self.assertEqual(self.units(), [(sh(self.repo, "rev-parse", "feat"), shas)])
+        self.assertEqual(records.units(self.repo)[0]["fork"], sh(self.repo, "rev-parse", "main"))  # 起点是分叉点
         self.assertEqual(records.fails(self.repo, "feat"), 0)
 
     def test_不通过计数加1_第2轮提示读diff(self):
@@ -217,7 +218,7 @@ print("VERDICT: PASS")
         # 单元的顶端是开跑前的分支顶端，新加的提交不在里面
         self.assertEqual(self.units(), [(feat_sha, before)])
         with open(log) as f:
-            self.assertIn(f"git diff {main_sha}...{feat_sha}", f.read())
+            self.assertIn(f"git diff {main_sha}..{feat_sha}", f.read())
 
     def test_有提交但合起来没改文件_记为通过(self):
         sh(self.repo, "checkout", "-q", "-b", "empty")
@@ -283,6 +284,12 @@ print("VERDICT: PASS")
         self.assertEqual(code, 0, out)
         self.assertEqual(out.splitlines()[0], "审核：通过")
 
+    def test_结论只按换行切行_换页符这类不算换行(self):
+        import review
+        self.assertEqual(review.verdicts_in("VERDICT: FAIL\n说明\x0cVERDICT: PASS\x0c别的\n"), ["FAIL"])
+        self.assertEqual(review.verdicts_in("引用\u2028VERDICT: PASS\u2028\nVERDICT: FAIL"), ["FAIL"])
+        self.assertEqual(review.verdicts_in("VERDICT: FAIL\r\n\tVERDICT: PASS  \r\n"), ["FAIL", "PASS"])
+
     def test_没有改动退出0(self):
         code, out = self.r(self.fake("pass", "VERDICT: PASS\n"), branch="main")
         self.assertEqual(code, 0, out)
@@ -321,17 +328,22 @@ print("VERDICT: PASS")
         self.assertEqual(len(self.units()), 1)
 
     def test_记录文件里读不懂的行跳过_不算通过(self):
-        feat = sh(self.repo, "rev-parse", "feat")
-        records.add_unit(self.repo, feat, [feat])
+        feat, main = sh(self.repo, "rev-parse", "feat"), sh(self.repo, "rev-parse", "main")
+        records.add_unit(self.repo, feat, main, [feat])
         path = os.path.join(os.path.dirname(records._path(self.repo, "x")), records.UNITS_FILE)
         with open(path, "a") as f:
             f.write("不是 JSON\n[1, 2]\n{}\n")
-            f.write(json.dumps({"tip": feat, "commits": []}) + "\n")                # 顶端不在提交里
-            f.write(json.dumps({"tip": feat, "commits": [feat, "main"]}) + "\n")    # 不是提交号
-            f.write(json.dumps({"tip": 1, "commits": "x"}) + "\n")
+            f.write(json.dumps({"tip": feat, "fork": main, "commits": []}) + "\n")              # 顶端不在提交里
+            f.write(json.dumps({"tip": feat, "fork": main, "commits": [feat, "main"]}) + "\n")  # 不是提交号
+            f.write(json.dumps({"tip": feat, "commits": [feat]}) + "\n")                        # 没有起点
+            f.write(json.dumps({"tip": feat, "fork": "main", "commits": [feat]}) + "\n")        # 起点不是提交号
+            f.write(json.dumps({"tip": 1, "fork": main, "commits": "x"}) + "\n")
         self.assertEqual(self.units(), [(feat, {feat})])
+        self.assertEqual(records.units(self.repo)[0]["fork"], main)
         with self.assertRaises(ValueError):
-            records.add_unit(self.repo, feat, [])  # 单元里必须有顶端提交
+            records.add_unit(self.repo, feat, main, [])  # 单元里必须有顶端提交
+        with self.assertRaises(ValueError):
+            records.add_unit(self.repo, feat, "", [feat])  # 必须有起点
 
 
 class DeployCheckCmd(RepoCase):
@@ -527,7 +539,9 @@ class Rollback(RepoCase):
         self.assertEqual(self.read("src/a.py"), "v1\n")
         new = sh(self.repo, "rev-parse", "HEAD")
         self.assertNotEqual(new, bad)
-        self.assertEqual(self.units(), [(new, {new})])
+        # 撤回之后和 bad 之前一模一样：记一个单元，起点是 bad 之前的那个提交
+        self.assertEqual(self.units(), [(new, {bad, new})])
+        self.assertEqual(records.units(self.repo)[0]["fork"], sh(self.repo, "rev-parse", bad + "~1"))
         self.assertIn(new[:12], out)
 
     def commit_change(self, rel, text):
@@ -550,9 +564,19 @@ class Rollback(RepoCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(self.read("src/a.py"), "v1\n")
         self.assertEqual(len(out.splitlines()[1].split()), 2)
-        # 两个回滚提交记成一个单元（要整批一起推），顶端是最后一个
+        # 记成一个单元：起点是 c1 之前，顶端是最后一个回滚提交（要整批一起推）
         head = sh(self.repo, "rev-parse", "HEAD")
-        self.assertEqual(self.units(), [(head, {head, sh(self.repo, "rev-parse", "HEAD~1")})])
+        self.assertEqual(self.units(), [(head, {c1, c2, head, sh(self.repo, "rev-parse", "HEAD~1")})])
+        self.assertEqual(records.units(self.repo)[0]["fork"], sh(self.repo, "rev-parse", c1 + "~1"))
+
+    def test_只撤回中间的一段_不记进审核记录(self):
+        c1 = self.commit_change("src/a.py", "v3\n")
+        self.commit_change("docs/later.md", "后来的\n")
+        code, out = self.rb("--commits", c1)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.read("src/a.py"), "v1\n")
+        self.assertIn("没有记进审核记录", out)  # 撤回后的内容以前从没出现过，是个没人审过的新状态
+        self.assertEqual(self.units(), [])
 
     def test_提交号不存在失败(self):
         head = sh(self.repo, "rev-parse", "HEAD")
@@ -660,6 +684,7 @@ class Rollback(RepoCase):
         self.assertEqual(out.splitlines()[0], "回滚：失败")
         self.assertIn("没有配置远端", out)
         self.assertIn("已经记进审核记录", out)
+        self.assertEqual(len(self.units()), 1)
         self.assertEqual(self.read("src/a.py"), "v1\n")  # 回滚提交留在本地
 
     def test_push_仓库配置让守卫看不懂推到哪_不推(self):
