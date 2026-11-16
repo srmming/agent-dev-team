@@ -452,6 +452,15 @@ class ShipWords(unittest.TestCase):
             "cat <<EOF\n$(git push)\nEOF",        # 结束符没加引号的 heredoc 正文会展开
             "cat <<EOF\n`git push`\nEOF",
             "cat <<-EOF\n\t$(git push)\n\tEOF",
+            "echo $(cat <<EOF)\ngit push\nEOF",    # zsh：括号里开的 heredoc，后面几行会被当命令执行
+            "cat <(cat <<'EOF')\ngit push\nEOF",
+            'echo "$(cat <<EOF)"\ngit push\nEOF',
+            "echo `cat <<EOF`\ngit push\nEOF",
+            "{git push}",                           # zsh：花括号不用空格
+            "{git push;}",
+            "() {git push}",
+            "=git push",                            # zsh：=git 是 git 的完整路径
+            "=gh pr create --fill",
         )
         self.not_ship(
             "cat <<'EOF'\n$(git push)\nEOF",      # 结束符加了引号：正文原样，不执行
@@ -461,6 +470,10 @@ class ShipWords(unittest.TestCase):
             "(( i > 3 )) && echo big",
             "[[ $a > $b ]] && echo yes",
             "if [[ -n $x && -f y ]]; then echo merge; fi",
+            "echo {a,b}.txt",
+            "find . -name '*.py' -exec grep -l merge {} +",
+            "echo ${x}merge",
+            "f() { echo merge; }; f",
         )
 
     def test_看不懂的结构加上push或merge这类词_按有算(self):
@@ -1500,7 +1513,8 @@ class LeadBlacklistWrapTest(unittest.TestCase):
                           ("bash <<EOF\nrm x\nEOF", "`rm`"), ("sudo -u bob touch x", "`touch`"),
                           ("nice -n 1 git add .", "git add"), ("noglob rm x", "`rm`"),
                           ("echo [[ && rm x", "`rm`"), ("echo $(( $(rm x) ))", "`rm`"),
-                          ("cat <<EOF\n$(rm x)\nEOF", "`rm`"), ("RM x", "`rm`"), ("BASH -c 'rm x'", "`rm`")):
+                          ("cat <<EOF\n$(rm x)\nEOF", "`rm`"), ("RM x", "`rm`"), ("BASH -c 'rm x'", "`rm`"),
+                          ("{rm x}", "`rm`"), ("=rm x", "`rm`"), ("echo $(cat <<EOF)\nrm x\nEOF", "`rm`")):
             reason = check_lead_bash(cmd)
             self.assertIsNotNone(reason, cmd)
             self.assertIn(word, reason, cmd)

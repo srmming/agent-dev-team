@@ -110,7 +110,7 @@
 
 **第一步：这条命令里有没有可能出现上传动作。** 对所有角色一样。
 
-- 把命令按 `;` `&&` `||` `|` `&`、换行、括号拆成一段段。`$( )`、反引号、`bash` / `sh` / `zsh -c "..."`、`eval "..."`、`trap "..."`、`alias 名字="..."`、喂给 shell 的 heredoc 和 `<<<`、没加引号的 heredoc 正文里的 `$( )`，里面的命令也拆开查。
+- 把命令按 `;` `&&` `||` `|` `&`、换行、括号拆成一段段。`$( )`、反引号、`bash` / `sh` / `zsh -c "..."`、`eval "..."`、`trap "..."`、`alias 名字="..."`、喂给 shell 的 heredoc 和 `<<<`、没加引号的 heredoc 正文里的 `$( )`，里面的命令也拆开查。拆法照着真的 bash 和 zsh 核对过：`((命令); x)` 不是算术、算术里套的 `$( )`、反引号里再套反引号、`$'...'` 里的转义、zsh 的 `{命令}` 和 `=git`、括号里开的 heredoc（zsh 里 `$(cat <<EOF)` 后面几行会被执行）都按会执行算。
 - 一段命令里，`git` 或 `gh`（不分大小写）不管出现在第几个词，后面跟着上传的子命令就算。所以不靠包装器名单：`env git push`、`timeout 30 git push`、`rtk proxy git push`、没见过的包装器都认得出。也不去记 git 的哪些选项带值：选项后面那个词可能是选项的值，也可能就是子命令，两种都算。代价是 `echo git push`、`git -C push status` 也算；`grep "git push" f` 这种加了引号的不算。
 - `gh api` 只有明显只读的才放：没指定方法或 `-X GET`，加上 `--jq`、`-H`、`--paginate` 这类只影响输出的选项。带 `-f` / `-F` 而没明说 GET、别的方法、`graphql`、认不出的选项，都按写算。
 - 看不懂的结构，加上命令文字里出现 `push`、`merge`、`send-pack`、`pr create`、`api` 这些词，按「有」算。看不懂的结构是：拆不开（引号括号没闭合、套得太深）；命令名是变量、命令替换、通配符或花括号展开（`$GIT push`、`{git,push}`）；shell 从标准输入读命令而守卫看不到内容（`... | bash`）；git / gh 的参数由 `xargs`、`find -exec` 拼出来。
@@ -177,7 +177,7 @@
 - `gh`（半自动开 PR、查 GitHub 上线状态用，可选）。
 - Notion 和 Slack 连接（看板和汇报用）。
 
-测试：`python3 -m unittest discover -s tests`。
+测试：`python3 -m unittest discover -s tests`。其中 `tests/test_shell_diff.py` 把一百多种写法交给真的 bash / zsh 跑（PATH 里放一个假的 git，只记下有没有被叫去上传），只要有一个 shell 真的执行了上传，守卫就必须认得出。
 
 ## 已知限制
 

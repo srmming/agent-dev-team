@@ -186,22 +186,34 @@ def _ansi_c(text):
     return ANSI_C_RE.sub(one, text)
 
 
+def _brace_word(s, i):
+    """s[i] 是词开头的 {。同一个词里后面有 }（{a,b}、{}、{1..3}）就是花括号展开或占位，整个算一个词；
+    没有（{git）就是 zsh 里不带空格的 { 命令 }。"""
+    for c in s[i + 1:]:
+        if c == "}":
+            return True
+        if c in " \t\r\n;|&<>()":
+            return False
+    return False
+
+
 def tokenize(cmd):
     """把命令拆成 (类型, 文本) 列表：w = 词，o = 引号外的操作符，s = 套在里面、要另外检查的命令，
     h = heredoc 的正文。引号里的 | ; > 等只算词的一部分，不算操作符。注释直接跳过。
     引号、括号没闭合时抛 ValueError。"""
     toks, buf, has, quoted, i, n = [], [], False, False, 0, len(cmd)
     heredocs, want = [], None  # 等着读正文的 heredoc；刚看到 << 还没读到结束符
+    parens = braces = 0  # 现在在几层括号里；当前这个词里还没配上对的 { 有几个
 
     def flush():
-        nonlocal buf, has, quoted, want
+        nonlocal buf, has, quoted, want, braces
         if has:
             word = "".join(buf)
             toks.append(("w", word))
             if want is not None:
-                heredocs.append((word, want, quoted))
+                heredocs.append((word, quoted) + want)
                 want = None
-        buf, has, quoted = [], False, False
+        buf, has, quoted, braces = [], False, False, 0
 
     while i < n:
         c = cmd[i]
@@ -278,7 +290,7 @@ def tokenize(cmd):
             toks.append(("o", c))
             i += 1
             while heredocs:  # heredoc 正文单独成一个 h 记号：只有喂给 shell 时才当命令查
-                delim, strip_tabs, literal = heredocs.pop(0)
+                delim, literal, strip_tabs, in_parens = heredocs.pop(0)
                 body = []
                 while i < n:
                     j = cmd.find("\n", i)
@@ -289,11 +301,16 @@ def tokenize(cmd):
                     body.append(line)
                 text = "\n".join(body)
                 toks.append(("h", text))
-                if not literal:  # 结束符没加引号：正文里的 $( ) 和反引号会被执行
+                if in_parens:
+                    # 在括号里开的 heredoc：bash 把后面几行当正文，zsh 里 $(cat <<EOF) 后面几行会被当命令执行。
+                    # 两种都算：既当正文，也当命令查
+                    toks.append(("s", text))
+                elif not literal:  # 结束符没加引号：正文里的 $( ) 和反引号会被执行
                     toks += [("s", t) for t in _subs(text)]
         elif c in "()":
             flush()
             toks.append(("o", c))
+            parens = max(parens + (1 if c == "(" else -1), 0)
             i += 1
         elif c in ";|&<>":
             op = next(o for o in OPERATORS if cmd.startswith(o, i))
@@ -303,8 +320,16 @@ def tokenize(cmd):
             toks.append(("o", op))
             i += len(op)
             if op in ("<<", "<<-"):
-                want = op == "<<-"
+                want = (op == "<<-", parens > 0)
+        elif c == "{" and not has and not _brace_word(cmd, i):
+            toks.append(("w", "{"))  # zsh 里 {git push} 不用空格：{ 单独算一个词
+            i += 1
+        elif c == "}" and has and not braces:
+            flush()  # push} 拆成 push 和 }
+            toks.append(("w", "}"))
+            i += 1
         else:
+            braces += (c == "{") - (c == "}" and braces > 0)
             buf.append(c)
             has = True
             i += 1
@@ -415,13 +440,19 @@ def unwrap(words):
     return words
 
 
+def cmd_name(word):
+    """一个词当命令名时指的是哪个程序：去掉路径，转小写（macOS 的文件名不分大小写，GIT 也是 git），
+    去掉 zsh 的 = 前缀（=git 是 git 的完整路径）。"""
+    return os.path.basename(word).lower().lstrip("=")
+
+
 def scripts_in(words, bodies):
     """这段命令里交给 shell 再跑一遍的文字：bash / sh -c "..."、eval "..."、trap "..." 信号、alias 名字="..."、
     喂给 shell 的 heredoc。这几个词不管出现在第几个词都认（前面可能有守卫不认识的包装器）。
     返回 (脚本文字列表, 有没有 shell 从标准输入读命令而守卫看不到内容)。"""
     out, blind, seen_eval = [], False, False
     for i, w in enumerate(words):
-        base = os.path.basename(w).lower()
+        base = cmd_name(w)
         if base == "eval" and not seen_eval:
             # 只取第一个 eval：它的文字已经包住后面的了（eval eval eval ... 每个都取会越拆越多）
             out.append(" ".join(words[i + 1:]))
@@ -526,7 +557,7 @@ def _perl_inplace(words):
 
 def check_words(words):
     """检查一段命令（已去掉前缀）。返回拦截原因或 None。"""
-    first = os.path.basename(words[0]).lower()  # macOS 的文件名不分大小写
+    first = cmd_name(words[0])
     if first in WRITE_CMDS:
         return f"负责人不能运行 `{first}`（会改动文件）。负责人只想、只调度；把这个改动写成派活单，派给子代理。"
     if first == "sed" and _sed_inplace(words):
@@ -655,22 +686,25 @@ def scan_ship(cmd):
         kinds = set()
         for raw in segs:
             bare = unwrap(raw)
-            if bare and _dyn(os.path.basename(bare[0])):
+            if bare and _dyn(cmd_name(bare[0])):
                 unknown = True  # 命令名要展开之后才知道，看不出跑的是什么
             for words in (raw, bare):  # bare：剥掉包装器再看一遍（env -S "git push" 这类）
                 fed = bool(ARG_FEEDERS & set(words))
                 for i, w in enumerate(words):
-                    base = os.path.basename(w).lower()  # macOS 的文件名不分大小写，GIT push 也是 git push
+                    base = cmd_name(w)
                     guess = _dyn(base) and not ASSIGN_RE.match(w)
                     if base.startswith("git-") and base[4:] in GIT_SHIP_SUBS:
                         kinds.add(GIT_SHIP_SUBS[base[4:]])  # <git 的程序目录>/git-push
+                    if guess:  # 把这个词当成 git / gh 试一次；只认紧跟着的子命令，不然随便一个变量后面有 merge 都算
+                        sub = git_parts(words[i:])[0]
+                        kinds |= {k for k in (GIT_SHIP_SUBS.get(sub), gh_ship(words[i:])) if k and k != "?"}
                     for name, ship in (("git", git_ship), ("gh", gh_ship)):
-                        if base != name and not guess:
+                        if base != name:
                             continue
                         kind = ship(words[i:])
-                        if base == name and (kind == "" and i > 0 or fed):
+                        if kind == "" and i > 0 or fed:
                             unknown = True  # xargs git、find -exec git {}：子命令从别处来
-                        if kind and (kind != "?" or base == name):
+                        if kind:
                             kinds.add(kind)
         return kinds, unknown
     except Exception:
