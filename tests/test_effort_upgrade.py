@@ -7,6 +7,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_dispatch_label  # noqa: E402
+import common  # noqa: E402
 wrapped = test_dispatch_label.wrapped
 
 DISPATCH = "【派活单】修状态栏\n子代理：dev-sonnet · 中\n1. 目标：……"
@@ -40,6 +41,25 @@ class EffortUpgradeTest(test_dispatch_label.DispatchLabelTest):
                      "【升档】x\n子代理：dev-opus · 高", "请【升档】\n子代理：dev-opus · 高", "子代理：dev-opus · 高\n【升档】"):
             self.submit(text)
             self.assertEqual(self.state("s1"), SUB, text)
+
+    def test_原文不严格_不写状态(self):
+        self.submit(DISPATCH)
+        for text in (" 【升档】\n子代理：dev-opus · 高", "\n【升档】\n子代理：dev-opus · 高",
+                     wrapped("  【升档】\n子代理：dev-opus · 高"), wrapped("\t【升档】\n子代理：dev-opus · 高")):
+            self.submit(text)
+            self.assertEqual(self.state("s1"), SUB, text)
+
+    def test_被拒升档_不写told_无输出(self):
+        self.submit(DISPATCH)
+        self.submit("普通消息")
+        told = common.load_told("s1")
+        self.assertIsNotNone(told)
+        self.set_state("s3", role="lead")
+        for text, sid in (("【升档】\n子代理：dev-opus · 特高", "s1"), ("【升档】\n子代理：dev-opus · 高", "s3")):
+            self.assertEqual(self.submit(text, sid=sid), "", text)
+        self.assertEqual(self.state_or_empty("s3"), {"role": "lead"})
+        self.assertEqual(common.load_told("s1"), told)
+        self.assertIsNone(common.load_told("s3"))
 
 
 if __name__ == "__main__":
