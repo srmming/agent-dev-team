@@ -528,6 +528,19 @@ class DeployCheckGitHub(RepoCase):
         code, out = self.d()
         self.assertEqual(code, 0, out)
 
+    def test_部署状态是inactive_无法判断(self):
+        # 没有检查结果，唯一的部署是 inactive（被别的部署替换了）：看不出这次部署成没成，不算通过也不算失败
+        self.fake_by_id({"total_count": 0, "check_runs": []}, [{"id": 7, "environment": "production"}],
+                        {7: [{"state": "inactive"}]})
+        code, out = self.d()
+        self.assertEqual(code, 3, out)
+        self.assertEqual(out.splitlines()[0], "上线检查：无法判断")
+        self.assertIn("inactive", out)
+        # 有确定的失败时还是不通过
+        self.fake_by_id({"check_runs": [{"id": 1, "name": "t", "status": "completed", "conclusion": "failure"}]},
+                        [{"id": 7, "environment": "production"}], {7: [{"state": "inactive"}]})
+        self.assertEqual(self.d()[0], 1)
+
     def test_任何一项查询失败都不报通过(self):
         for runs, deps, statuses in (
                 (self.OK_RUNS, None, {}),                                     # 部署查询失败

@@ -303,6 +303,43 @@ class PromptSubmitTest(Base):
         self.assertEqual(r.returncode, 0)
         self.assertEqual(self.state("unknown"), {"auto": "semi"})
 
+    def session_start(self, sid="s1"):
+        data = {"session_id": sid, "cwd": self.cwd, "hook_event_name": "SessionStart", "source": "startup"}
+        r = self.run_script("session_start.py", json.dumps(data))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout
+
+    def test_状态栏按钮改了状态文件_下一条普通消息告诉模型新角色(self):
+        self.cwd = self.make_repo()
+        self.assertIn("负责人模式", self.session_start())
+        self.assertEqual(self.submit("加个功能"), "")              # 角色没变：什么都不加
+        self.set_state("s1", role="normal")                        # 状态栏按钮只写状态文件
+        ctx = self.context(self.submit("帮我改一下 README"))
+        self.assertIn("忽略之前", ctx)
+        self.assertIn(common.NORMAL_TEXT, ctx)
+        self.assertEqual(self.state("s1"), {"role": "normal"})    # 状态文件本身不多出别的键
+        self.assertEqual(self.submit("再改一下"), "")              # 已经告诉过了，不重复
+        self.set_state("s1", role="normal", auto="semi")           # 普通对话里切全自动 / 半自动用不上，不提示
+        self.assertEqual(self.submit("继续"), "")
+        self.set_state("s1", role="lead", auto="semi")
+        ctx = self.context(self.submit("继续"))
+        self.assertIn("负责人模式", ctx)
+        self.assertIn("当前是「半自动」", ctx)
+        self.set_state("s1", role="lead", auto="full")
+        self.assertIn("当前是「全自动」", self.context(self.submit("继续")))
+        self.assertEqual(self.submit("继续"), "")
+
+    def test_口令切换也记下已告诉的模式_下一条不重复提示(self):
+        self.cwd = self.make_repo()
+        self.session_start()
+        self.context(self.submit("普通对话"))
+        self.assertEqual(self.submit("帮我改一下 README"), "")
+        self.context(self.submit("负责人模式"))
+        self.context(self.submit("半自动"))
+        self.assertEqual(self.submit("加个功能"), "")
+        self.context(self.submit("【派活单】修个 bug"))
+        self.assertEqual(self.submit("继续"), "")
+
 
 class ModeCliTest(Base):
     def mode(self, *args):

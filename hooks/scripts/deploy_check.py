@@ -19,7 +19,7 @@ from common import TAIL, git, project_config, repo_root, run_shell as _run_shell
 
 CMD_TIMEOUT = 300
 CHECK_OK = {"success", "neutral", "skipped"}
-DEPLOY_OK = {"success", "inactive"}
+DEPLOY_OK = {"success"}  # inactive（被别的部署替换了）看不出这次成没成，按无法判断
 DEPLOY_BAD = {"failure", "error"}
 STATUS_BAD = {"failure", "error"}
 
@@ -108,6 +108,8 @@ def github_status(cwd, repo, sha):
         state = sts[0].get("state") if sts and isinstance(sts[0], dict) else "pending"
         if state in DEPLOY_BAD:
             bad.append(f"部署 {env}：{state}")
+        elif state == "inactive":
+            unknown.append(f"部署 {env} 状态 inactive（已被别的部署替换，看不出这次部署成没成功）")
         elif state not in DEPLOY_OK:
             running.append(f"部署 {env} 状态 {state}")
     if bad:

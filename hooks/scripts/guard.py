@@ -1334,8 +1334,12 @@ def check_upload(cwd, cmd, kinds, semi, codex_off):
     if not up:
         return UPLOAD_FORM
     kind, args, cdir = up
-    if cdir:
-        cwd = os.path.abspath(os.path.join(cwd, os.path.expanduser(cdir)))
+    if cdir:  # 路径原样交给 git 解析（符号链接后面的 .. 守卫自己算会算错）；~ 有没有被 shell 展开守卫分不出，不认
+        top = None if "~" in cdir else git(cwd, "-C", cdir, "rev-parse", "--show-toplevel")
+        if not top:
+            return (f"守卫查不出 `git -C {cdir}` 是哪个仓库：不是 git 仓库、git 出错，或者路径里有 ~。"
+                    "路径写成不带 ~ 的绝对路径。查不了就不能放行。")
+        cwd = top
     if not os.path.isdir(cwd) or git(cwd, "rev-parse", "--git-dir") is None:
         return f"{cwd} 不是 git 仓库，守卫查不了这条上传命令，不能放行。"
     plan = {"merge": merge_plan, "push": push_plan, "pr-create": pr_plan}[kind](cwd, args)

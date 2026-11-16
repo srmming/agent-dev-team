@@ -197,10 +197,51 @@ def rules_text():
 
 
 def role_text(r, data):
-    """会话开始时按角色给的提示。none 返回空字符串。"""
+    """会话开始时按角色给的提示，同时记下「已经告诉模型的角色和模式」。none 返回空字符串。"""
     if r == "lead":
-        return lead_text(auto_mode(data), session_id(data))
-    return {"normal": NORMAL_TEXT, "kuaixiu": KUAIXIU_TEXT, "subagent": SUBAGENT_TEXT}.get(r, "")
+        text = lead_text(auto_mode(data), session_id(data))
+    else:
+        text = {"normal": NORMAL_TEXT, "kuaixiu": KUAIXIU_TEXT, "subagent": SUBAGENT_TEXT}.get(r, "")
+    if text:
+        save_told(data, r)
+    return text
+
+
+# ---------- 上次已经告诉模型的角色和模式 ----------
+# 状态栏按钮只改状态文件，模型不知道。prompt_submit.py 每条消息比一下，变了才再告诉一次。
+# 记在状态文件旁边的 <session>.told 里，不进状态文件：状态文件只放模式本身（mode.py get 原样打印它）。
+
+def told_key(r, data):
+    """模型该知道的角色和模式。全自动 / 半自动只有负责人用得上，别的角色只看角色。"""
+    return f"{r}/{auto_mode(data)}" if r == "lead" else r
+
+
+def told_path(sid):
+    return session_path(sid)[:-len(".json")] + ".told"
+
+
+def load_told(sid):
+    """没记过（或读不了）返回 None。"""
+    try:
+        with open(told_path(sid), encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return None
+
+
+def save_told(data, r):
+    """记下已经告诉模型的角色和模式。子代理（有 agent_id）不记，它和开它的对话共用 session id。出错不影响提示。"""
+    if data.get("agent_id"):
+        return
+    try:
+        p = told_path(session_id(data))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        tmp = f"{p}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(told_key(r, data))
+        os.replace(tmp, p)
+    except Exception:
+        pass
 
 
 TAIL = 30

@@ -1262,6 +1262,25 @@ class UploadGateTest(GuardCase):
         self.deny(plain, "git -C repo merge feat", "不是 git 仓库")
         self.deny(plain, f"git -C {self.tmp}/不存在 merge feat", "不是 git 仓库")
 
+    def test_C的路径交给git解析_符号链接加点点和波浪号(self):
+        self.commit(self.repo, "feat")
+        self.reviewed(self.repo, "feat")
+        # repo/link 指向 other/sub：link/.. 按字面折叠是 repo，git 真去的是 other（feat 没审核）
+        other = self.make_repo("other")
+        os.makedirs(os.path.join(other, "sub"))
+        self.commit(other, "feat")
+        os.symlink(os.path.join(other, "sub"), os.path.join(self.repo, "link"))
+        self.allow(self.repo, "git -C . merge feat")
+        self.deny(self.repo, "git -C link/.. merge feat", "还没通过 Codex 审核")
+        self.deny(self.repo, "git -C link/.. push origin feat", "没有配置远端")  # other 没有远端
+        # ~/proj 是审核过的仓库；引号里的 ~ git 不展开，没引号的 shell 会展开：守卫分不出，一律不认
+        home = self.make_repo(os.path.join("home", "proj"))
+        self.commit(home, "feat")
+        self.reviewed(home, "feat")
+        for cmd in ("git -C '~/proj' merge feat", 'git -C "~/proj" merge feat', "git -C ~/proj merge feat"):
+            self.deny(self.repo, cmd, "路径里有 ~")
+        self.allow(self.repo, f"git -C {home} merge feat")
+
     def test_merge_中止放行_看不懂的写法一律拦(self):
         self.all_reviewed()
         self.allow(self.repo, "git merge --abort")
