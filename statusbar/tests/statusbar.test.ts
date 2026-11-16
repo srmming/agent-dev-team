@@ -305,42 +305,129 @@ test('主插件关掉（项目根有 .claude/agent-dev-team-off）：不显示',
   await ui.unmount()
 })
 
-test('详情展开和收起', async ($, on) => {
+// 详情里的几栏：每栏三行（小标题 / 大字 / 小字），按 key 找
+const columnsOf = async (ui: any) => {
+  const body = await ui.find({ key: 'details-body' })
+  if (body === undefined) return undefined
+  expect(body.props.flexDirection).toBe('row')
+  const boxes = (await ui.findAll({ type: 'Box' })).filter((b: any) => String(b.key).startsWith('col-'))
+  const out: Record<string, string[]> = {}
+  for (const b of boxes) {
+    expect(b.props.flexDirection).toBe('column')
+    // 每栏下面直接是三行 Text
+    expect(b.children.map((c: any) => c.type)).toEqual(['Text', 'Text', 'Text'])
+    out[b.key] = b.children.map((c: any) => c.children.join(''))
+  }
+  return out
+}
+
+test('详情展开和收起：横排四栏 + token 一栏', async ($, on) => {
   setup(on, {
-    file: { role: 'lead', auto: 'semi', status: '在改登录页', tokens: 123456 },
-    agents: [agent('a1', '改登录页'), { ...agent('a2', '查代码'), name: 'checker' }],
+    file: { role: 'lead', auto: 'semi', status: '验收：结算页优惠码校验', pool: 2, tokens: 123456 },
+    agents: [agent('a1', 'dev-opus'), { ...agent('a2', '查代码'), name: 'dev-sonnet' }],
   })
   await start($)
   for (const surface of SURFACES) {
     const ui = await mount($, surface)
-    expect((await look(ui)).all).not.toContain('模式：')
+    let l = await look(ui)
+    expect(l.texts).toContain('● 验收中 · 2 个子代理在跑')
+    expect(await columnsOf(ui)).toBeUndefined()
 
     await ui.press({ key: 'details' })
-    let l = await look(ui)
+    l = await look(ui)
     expect(l.label('details')).toBe('收起')
-    expect(l.texts).toContain('模式：负责人模式 · 半自动')
-    expect(l.texts).toContain('现在在做：在改登录页')
-    expect(l.texts).toContain('在跑的子代理：改登录页、checker')
-    expect(l.texts).toContain('token 用量：123,456')
+    const cols = await columnsOf(ui)
+    expect(Object.keys(cols ?? {})).toEqual(['col-mode', 'col-doing', 'col-agents', 'col-pool', 'col-tokens'])
+    expect(cols?.['col-mode']).toEqual(['模式', '负责人', '半自动 · 只调度，不写代码'])
+    expect(cols?.['col-doing']).toEqual(['现在在做', '验收', '结算页优惠码校验'])
+    expect(cols?.['col-agents']).toEqual(['子代理', '2 个在跑', 'dev-opus、dev-sonnet'])
+    expect(cols?.['col-pool']).toEqual(['小任务池', '攒了 2 个', '攒够 8 个一起派'])
+    expect(cols?.['col-tokens']).toEqual(['token 用量', '123,456', '这个对话'])
+    // 大字是粗体，小标题和小字是灰色
+    const big = (await ui.findAll({ type: 'Text' })).find((t: any) => t.text === '验收')
+    expect(big?.props.bold).toBe(true)
+    const small = (await ui.findAll({ type: 'Text' })).find((t: any) => t.text === '结算页优惠码校验')
+    expect(small?.props.dimColor).toBe(true)
 
     await ui.press({ key: 'details' })
     l = await look(ui)
     expect(l.label('details')).toBe('详情')
-    expect(l.all).not.toContain('模式：')
+    expect(await columnsOf(ui)).toBeUndefined()
     await ui.unmount()
   }
 })
 
-test('详情里没有的值显示「—」', async ($, on) => {
+test('没写 status、没有 pool / tokens：四栏用默认值，token 那栏整个不出现', async ($, on) => {
   setup(on)
   await start($)
   const ui = await mount($, 'desktop')
   await ui.press({ key: 'details' })
-  const l = await look(ui)
-  expect(l.texts).toContain('模式：负责人模式 · 全自动')
-  expect(l.texts).toContain('现在在做：—')
-  expect(l.texts).toContain('在跑的子代理：没有')
-  expect(l.texts).toContain('token 用量：—')
+  const cols = await columnsOf(ui)
+  expect(Object.keys(cols ?? {})).toEqual(['col-mode', 'col-doing', 'col-agents', 'col-pool'])
+  expect(cols?.['col-mode']).toEqual(['模式', '负责人', '全自动 · 只调度，不写代码'])
+  expect(cols?.['col-doing']).toEqual(['现在在做', '待命', '—'])
+  expect(cols?.['col-agents']).toEqual(['子代理', '没有在跑', '—'])
+  expect(cols?.['col-pool']).toEqual(['小任务池', '攒了 0 个', '攒够 8 个一起派'])
+  const all = (await look(ui)).all
+  expect(all).not.toContain('token')
+  await ui.unmount()
+})
+
+test('没写 status 但有子代理在跑：现在在做是「开发中」', async ($, on) => {
+  setup(on, { agents: [agent('a1', 'dev-opus')] })
+  await start($)
+  const ui = await mount($, 'desktop')
+  expect((await look(ui)).texts).toContain('● 开发中 · 1 个子代理在跑')
+  await ui.press({ key: 'details' })
+  const cols = await columnsOf(ui)
+  expect(cols?.['col-doing']).toEqual(['现在在做', '开发中', '—'])
+  expect(cols?.['col-agents']).toEqual(['子代理', '1 个在跑', 'dev-opus'])
+  await ui.unmount()
+})
+
+test('status 的几种写法：英文冒号、没有冒号、已经带「中」、空字符串', async ($, on) => {
+  const s = setup(on)
+  await start($)
+  const check = async (status: unknown, line: string, doing: string[]) => {
+    s.setFile({ role: 'lead', status })
+    await turnEnd($)
+    const ui = await mount($, 'desktop')
+    const l = await look(ui)
+    expect(l.texts).toContain(line)
+    // 展开状态会留到下一次，已经展开就不再点
+    if (l.label('details') === '详情') await ui.press({ key: 'details' })
+    expect((await columnsOf(ui))?.['col-doing']).toEqual(doing)
+    await ui.unmount()
+  }
+  await check('审核: 登录页', '● 审核中', ['现在在做', '审核', '登录页'])
+  await check('等你确认', '● 等你确认', ['现在在做', '等你确认', '—'])
+  await check('合并中：支付回调', '● 合并中', ['现在在做', '合并中', '支付回调'])
+  await check('派活：', '● 派活中', ['现在在做', '派活', '—'])
+  await check('', '● 待命', ['现在在做', '待命', '—'])
+})
+
+test('pool 个数：写了就显示，不合法当 0', async ($, on) => {
+  const s = setup(on)
+  await start($)
+  for (const [pool, word] of [[5, '攒了 5 个'], [-1, '攒了 0 个'], ['3', '攒了 0 个'], [1.5, '攒了 0 个']] as const) {
+    s.setFile({ role: 'lead', pool })
+    await turnEnd($)
+    const ui = await mount($, 'desktop')
+    // 展开状态会留到下一次，已经展开就不再点
+    if ((await look(ui)).label('details') === '详情') await ui.press({ key: 'details' })
+    expect((await columnsOf(ui))?.['col-pool']).toEqual(['小任务池', word, '攒够 8 个一起派'])
+    await ui.unmount()
+  }
+})
+
+test('普通对话的详情：模式栏写普通对话', async ($, on) => {
+  setup(on, { file: { role: 'normal', tokens: '1.2k' } })
+  await start($)
+  const ui = await mount($, 'desktop')
+  await ui.press({ key: 'details' })
+  const cols = await columnsOf(ui)
+  expect(cols?.['col-mode']).toEqual(['模式', '普通对话', '这个窗口自己直接改文件'])
+  expect(cols?.['col-tokens']).toEqual(['token 用量', '1.2k', '这个对话'])
   await ui.unmount()
 })
 

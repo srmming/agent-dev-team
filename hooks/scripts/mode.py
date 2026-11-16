@@ -2,9 +2,14 @@
 """查看 / 切换一个对话的模式（状态栏按钮和负责人都能用）。
 
   mode.py get --session <id> [--cwd <项目目录>]
-  mode.py set --session <id> [--role lead|normal|subagent|kuaixiu] [--auto full|semi] [--status "<文字>"]
+  mode.py set --session <id> [--role lead|normal|subagent|kuaixiu] [--auto full|semi]
+              [--status "<节点>：<任务名>"] [--pool <N>]
 
 get 打印这个对话的状态（JSON）。set 改完后也打印一遍。参数不对时退出码 2。
+
+--status 是状态栏上「现在在做」：写成「验收：结算页优惠码校验」，冒号（中文或英文都行）前的
+「验收」是大字，后面是小字；没有冒号整句当大字。--status "" 清空，状态栏回到默认的「待命 / 开发中」。
+--pool 是小任务池里攒了几个（0 或正整数），状态栏显示「攒了 N 个」。
 """
 import argparse
 import json
@@ -46,7 +51,8 @@ def main(argv=None):
         if name == "set":
             p.add_argument("--role", help="lead（负责人模式）/ normal（普通对话）/ subagent（子代理）/ kuaixiu（对接窗口）")
             p.add_argument("--auto", help="full（全自动）/ semi（半自动）")
-            p.add_argument("--status", help="状态栏上显示的一句话")
+            p.add_argument("--status", help="状态栏上的「现在在做」，写成「<节点>：<任务名>」，比如「验收：结算页优惠码校验」；空字符串是清空")
+            p.add_argument("--pool", help="小任务池里攒了几个（0 或正整数）")
     args = parser.parse_args(argv)
     if not args.action:
         parser.error("要写 get 或 set")
@@ -68,8 +74,13 @@ def main(argv=None):
         changes["auto"] = args.auto
     if args.status is not None:
         changes["status"] = args.status
+    if args.pool is not None:
+        text = args.pool.strip()
+        if not (text.isascii() and text.isdigit()):
+            fail(f"--pool 只能是 0 或正整数，不能是 {args.pool!r}")
+        changes["pool"] = int(text)
     if not changes:
-        fail("set 至少要带 --role、--auto、--status 里的一个")
+        fail("set 至少要带 --role、--auto、--status、--pool 里的一个")
     show(save_session(args.session, **changes), args.cwd)
 
 

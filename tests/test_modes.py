@@ -396,6 +396,36 @@ class ModeCliTest(Base):
         self.mode("set", "--session", "s1", "--status", "x")
         self.assertEqual(self.state("s1"), {"role": "lead", "extra": {"a": 1}, "status": "x"})
 
+    def test_set_status_写节点和任务_空字符串是清空(self):
+        r = self.mode("set", "--session", "s1", "--status", "验收：结算页优惠码校验")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.state("s1"), {"status": "验收：结算页优惠码校验"})
+        r = self.mode("set", "--session", "s1", "--status", "")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.state("s1"), {"status": ""})
+
+    def test_set_pool(self):
+        self.set_state("s1", role="lead", status="派活：登录页")
+        r = self.mode("set", "--session", "s1", "--pool", "3")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.state("s1"), {"role": "lead", "status": "派活：登录页", "pool": 3})
+        self.assertEqual(json.loads(r.stdout)["pool"], 3)
+        self.assertEqual(self.mode("set", "--session", "s1", "--pool", "0").returncode, 0)
+        self.assertEqual(self.state("s1")["pool"], 0)
+        # 能和别的参数一起写
+        self.assertEqual(self.mode("set", "--session", "s1", "--pool", "8", "--status", "").returncode, 0)
+        self.assertEqual(self.state("s1"), {"role": "lead", "status": "", "pool": 8})
+
+    def test_set_pool_不合法_退出码2_不改文件(self):
+        self.set_state("s1", pool=2)
+        for bad in ("-1", "1.5", "abc", "", "３"):
+            r = self.mode("set", "--session", "s1", "--pool", bad)
+            self.assertEqual(r.returncode, 2, bad)
+            self.assertEqual(r.stdout, "", bad)
+            self.assertIn("参数不对", r.stderr, bad)
+            self.assertIn("--pool", r.stderr, bad)
+        self.assertEqual(self.state("s1"), {"pool": 2})
+
     def test_set_之后角色判断跟着变(self):
         repo = self.make_repo()
         self.mode("set", "--session", "s1", "--role", "normal")
@@ -424,7 +454,10 @@ class ModeCliTest(Base):
         r = self.mode("--help")
         self.assertEqual(r.returncode, 0)
         self.assertIn("get", r.stdout)
-        self.assertEqual(self.mode("set", "--help").returncode, 0)
+        r = self.mode("set", "--help")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("--pool", r.stdout)
+        self.assertIn("--status", r.stdout)
 
 
 class SessionStartTest(Base):

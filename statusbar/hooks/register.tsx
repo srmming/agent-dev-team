@@ -16,6 +16,8 @@ const expanded = atom({ plugin: 'agent-dev-team-status', key: 'expanded' } as co
 const ACTIVE = ['pending', 'running', 'waiting']
 const ROLES = ['lead', 'normal', 'subagent', 'kuaixiu']
 const AUTOS = ['full', 'semi']
+// 小任务池攒够这么多个一起派（和负责人技能里的规则一样）
+const POOL_BATCH = 8
 
 type $ = EngineInterface
 type Raw = Record<string, unknown>
@@ -97,7 +99,9 @@ async function loadView($: $): Promise<StatusView> {
   let role = typeof data.role === 'string' && ROLES.includes(data.role) ? data.role : undefined
   if (role === undefined) role = (await onKuaixiuBranch($, await $.session.cwd())) ? 'kuaixiu' : 'lead'
   const status = typeof data.status === 'string' && data.status.trim() !== '' ? data.status.trim() : null
-  return { off, role, auto, status, tokens: tokensText(data.tokens) }
+  // pool：小任务池里攒了几个，非负整数；没有或不对当 0
+  const pool = typeof data.pool === 'number' && Number.isInteger(data.pool) && data.pool >= 0 ? data.pool : 0
+  return { off, role, auto, status, pool, tokens: tokensText(data.tokens) }
 }
 
 type Row = { id: string; type: string; teammateId?: string; status: string; name?: string; description: string }
@@ -136,16 +140,58 @@ async function writeMode($: $, patch: { role?: string; auto?: string }): Promise
 
 // ---------- 文字 ----------
 
+// 负责人写的 status 是「<节点>：<任务名>」：冒号（中文或英文）前是大字，后是小字；没有冒号整句是大字。
+// node：是不是「节点：任务」这种写法
+function splitStatus(status: string): { big: string; small: string | null; node: boolean } {
+  const m = /^([^:：]+)[:：](.*)$/.exec(status)
+  if (m === null) return { big: status, small: null, node: false }
+  const small = m[2].trim()
+  return { big: m[1].trim(), small: small === '' ? null : small, node: true }
+}
+
+// 没写 status 时的默认说法
+function idleWord(n: number): string {
+  return n > 0 ? '开发中' : '待命'
+}
+
+// 收起那一行的状态词：写了「节点：任务」就是「节点中」（验收 → 验收中）；整句就原样
+function statusWord(v: StatusView, n: number): string {
+  if (v.status === null) return idleWord(n)
+  const { big, node } = splitStatus(v.status)
+  if (!node || big.endsWith('中')) return big
+  return `${big}中`
+}
+
 function statusLine(v: StatusView, n: number): string {
-  const word = v.status ?? (n > 0 ? '开发中' : '待命')
+  const word = statusWord(v, n)
   return n > 0 ? `● ${word} · ${n} 个子代理在跑` : `● ${word}`
 }
 
-function modeName(v: StatusView): string {
-  if (v.role === 'normal') return '普通对话'
-  if (v.role === 'kuaixiu') return '对接窗口'
-  if (v.role === 'subagent') return '子代理'
-  return `负责人模式 · ${v.auto === 'semi' ? '半自动' : '全自动'}`
+type Column = { key: string; title: string; big: string; small: string }
+
+// 详情的几栏：模式 / 现在在做 / 子代理 / 小任务池，状态文件里有 tokens 时再加一栏 token 用量
+function columns(v: StatusView, list: readonly RunningAgent[]): Column[] {
+  const n = list.length
+  const isLead = v.role !== 'normal'
+  const doing = v.status === null ? { big: idleWord(n), small: null } : splitStatus(v.status)
+  const out: Column[] = [
+    {
+      key: 'col-mode',
+      title: '模式',
+      big: isLead ? '负责人' : '普通对话',
+      small: isLead ? `${v.auto === 'semi' ? '半自动' : '全自动'} · 只调度，不写代码` : '这个窗口自己直接改文件',
+    },
+    { key: 'col-doing', title: '现在在做', big: doing.big, small: doing.small ?? '—' },
+    {
+      key: 'col-agents',
+      title: '子代理',
+      big: n > 0 ? `${n} 个在跑` : '没有在跑',
+      small: n > 0 ? list.map(a => a.label).join('、') : '—',
+    },
+    { key: 'col-pool', title: '小任务池', big: `攒了 ${v.pool} 个`, small: `攒够 ${POOL_BATCH} 个一起派` },
+  ]
+  if (v.tokens !== null) out.push({ key: 'col-tokens', title: 'token 用量', big: v.tokens, small: '这个对话' })
+  return out
 }
 
 // ---------- 注册 ----------
@@ -240,13 +286,14 @@ export const register: Register = on => {
     return (
       <Box key="band" flexDirection="column">
         {row}
-        <Box key="details-body" flexDirection="column" paddingLeft={2}>
-          <Text dimColor>模式：{modeName(v)}</Text>
-          <Text dimColor>现在在做：{v.status ?? '—'}</Text>
-          <Text dimColor>
-            在跑的子代理：{list.length === 0 ? '没有' : list.map(a => a.label).join('、')}
-          </Text>
-          <Text dimColor>token 用量：{v.tokens ?? '—'}</Text>
+        <Box key="details-body" flexDirection="row" columnGap={2} paddingLeft={2} paddingTop={1}>
+          {columns(v, list).map(c => (
+            <Box key={c.key} flexDirection="column" flexGrow={1}>
+              <Text dimColor>{c.title}</Text>
+              <Text bold>{c.big}</Text>
+              <Text dimColor>{c.small}</Text>
+            </Box>
+          ))}
         </Box>
       </Box>
     )
