@@ -73,9 +73,17 @@ def github_repo(cwd):
 
 def github_status(cwd, repo, sha):
     """查一次。返回 (状态, 说明行)，状态是 ok / fail / running / none。"""
-    bad, running, seen = [], [], 0
+    """查一次。返回 (状态, 说明行)，状态是 ok / fail / running / none。
+    同名检查、同一环境的部署可能有好几次（重跑、重新部署），每个只看最新一次。
+    任何一项查询失败都不报通过：确定有失败报 fail，否则报 none（无法判断）。"""
+    bad, running, unknown, seen = [], [], [], 0
     runs = gh_api(cwd, f"repos/{repo}/commits/{sha}/check-runs?per_page=100")
-    for c in (runs or {}).get("check_runs", []) or []:
+    if not isinstance(runs, dict) or not isinstance(runs.get("check_runs"), list):
+        unknown.append("查不到检查结果（gh 查询失败）")
+        runs = {"check_runs": []}
+    elif isinstance(runs.get("total_count"), int) and runs["total_count"] > len(runs["check_runs"]):
+        unknown.append(f"检查有 {runs['total_count']} 个，只查到 {len(runs['check_runs'])} 个")
+    for c in _latest(runs["check_runs"], "name", "started_at"):
         seen += 1
         name = c.get("name", "?")
         if c.get("status") != "completed":
@@ -83,24 +91,43 @@ def github_status(cwd, repo, sha):
         elif c.get("conclusion") not in CHECK_OK:
             bad.append(f"检查 {name}：{c.get('conclusion')}")
     deps = gh_api(cwd, f"repos/{repo}/deployments?sha={sha}&per_page=100")
-    for d in deps or []:
+    if not isinstance(deps, list):
+        unknown.append("查不到部署记录（gh 查询失败）")
+        deps = []
+    for d in _latest(deps, "environment", "created_at"):
         seen += 1
         env = d.get("environment", "?")
-        sts = gh_api(cwd, f"repos/{repo}/deployments/{d.get('id')}/statuses?per_page=1") or []
-        state = sts[0].get("state") if sts else "pending"
+        sts = gh_api(cwd, f"repos/{repo}/deployments/{d.get('id')}/statuses?per_page=1")
+        if not isinstance(sts, list):
+            unknown.append(f"查不到部署 {env} 的状态（gh 查询失败）")
+            continue
+        state = sts[0].get("state") if sts and isinstance(sts[0], dict) else "pending"
         if state in DEPLOY_BAD:
             bad.append(f"部署 {env}：{state}")
         elif state not in DEPLOY_OK:
             running.append(f"部署 {env} 状态 {state}")
     if bad:
         return "fail", bad
+    if unknown:
+        return "none", unknown
     if running:
         return "running", running
     if seen:
         return "ok", []
-    if runs is None and deps is None:
-        return "none", ["gh 查询失败（没登录或这个提交还没推上去）"]
     return "none", ["GitHub 上这个提交没有检查结果，也没有部署记录"]
+
+
+def _latest(items, key, time_key):
+    """按 key 分组，每组只留最新的一个（先比时间，再比 id）。"""
+    best = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        k = it.get(key, "?")
+        rank = (str(it.get(time_key) or ""), it.get("id") if isinstance(it.get("id"), int) else 0)
+        if k not in best or rank > best[k][0]:
+            best[k] = (rank, it)
+    return [it for _, it in best.values()]
 
 
 def _num(value, default, cast):
@@ -179,6 +206,9 @@ def main(argv=None):
     cfg = project_config(root)
     dc = cfg.get("deploy_check") if isinstance(cfg, dict) else None
     if isinstance(dc, dict) and dc.get("cmd"):
+        if not isinstance(dc["cmd"], str):
+            print("上线检查：无法判断\n项目配置里的 deploy_check.cmd 要写成一条命令文字")
+            return 3
         return check_by_cmd(cwd, dc, a)
 
     repo = github_repo(cwd)
@@ -195,4 +225,10 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001  脚本自己出错时给出明确结论，不让负责人当成别的结果
+        print('上线检查：无法判断' + "\n脚本自己出错：" + repr(e))
+        sys.exit(3)

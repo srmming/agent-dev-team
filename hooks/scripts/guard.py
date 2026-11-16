@@ -7,7 +7,8 @@
   1. 不能用编辑工具改项目根目录里的文件；
   2. 命令行只拦「写」的动作（黑名单），其余放行；
   3. 上传关：合并 / 推送 / 开 PR 前，提交必须都在审核通过记录里（守卫自己不跑 Codex）；
-  4. 半自动：不直接合并进默认分支、不直接推默认分支。
+  4. 半自动：不直接合并进默认分支、不直接推默认分支、不用 gh 合并 PR。
+认命令时先剥掉包装器（env / sudo / rtk proxy / timeout ……），bash -c、eval、$( ) 等里面的命令也拆开查。
 
 退出码 2 = 拦截，stderr 会反馈给 Claude。守卫自己出任何错都放行，不拦用户。
 """
@@ -15,6 +16,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -38,8 +40,29 @@ WRITE_OPS = {">", ">>", "&>", "&>>", ">|", ">&", "<>"}
 READ_OPS = {"<", "<<", "<<-", "<<<", "<&"}
 SAFE_TARGETS = {"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"}
 KEYWORDS = {"do", "then", "else", "elif", "if", "while", "until", "!", "{", "time"}
-WRAPPERS = {"rtk", "command", "builtin", "exec", "nohup", "sudo", "env", "xargs"}
-XARGS_VALUE_OPTS = {"-I", "-n", "-P", "-L", "-s", "-E", "-d", "-a", "-J", "-R", "-S"}
+ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\+?=")
+# 包装器：剥掉它和它的选项，后面才是真正的命令。值是「后面跟一个值」的选项。
+WRAPPER_OPTS = {
+    "env": {"-u", "--unset", "-C", "--chdir", "-P"},
+    "rtk": set(),
+    "sudo": {"-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-C", "--close-from",
+             "-D", "--chdir", "-R", "--chroot", "-r", "--role", "-t", "--type", "-T", "--command-timeout",
+             "-U", "--other-user"},
+    "doas": {"-u", "-C"},
+    "command": set(),
+    "builtin": set(),
+    "exec": {"-a"},
+    "nohup": set(),
+    "nice": {"-n", "--adjustment"},
+    "ionice": {"-c", "--class", "-n", "--classdata", "-p", "-P", "-u"},
+    "timeout": {"-s", "--signal", "-k", "--kill-after"},
+    "gtimeout": {"-s", "--signal", "-k", "--kill-after"},
+    "stdbuf": {"-i", "-o", "-e"},
+    "caffeinate": {"-t", "-w"},
+    "xargs": {"-I", "-n", "-P", "-L", "-s", "-E", "-d", "-a", "-J", "-R", "-S"},
+}
+SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "mksh", "ash", "fish"}
+MAX_DEPTH = 5
 GIT_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"}
 MERGE_VALUE_OPTS = {"-m", "--message", "-F", "--file", "-s", "--strategy", "-X", "--strategy-option",
                     "--into-name", "--cleanup"}
@@ -187,14 +210,17 @@ def tokenize(cmd):
             flush()
             toks.append(("o", c))
             i += 1
-            while heredocs:  # 跳过 heredoc 正文，直到结束符那一行
+            while heredocs:  # heredoc 正文单独成一个 h 记号：只有喂给 shell 时才当命令查
                 delim, strip_tabs = heredocs.pop(0)
+                body = []
                 while i < n:
                     j = cmd.find("\n", i)
                     line = cmd[i:n if j < 0 else j]
                     i = n if j < 0 else j + 1
                     if (line.lstrip("\t") if strip_tabs else line) == delim:
                         break
+                    body.append(line)
+                toks.append(("h", "\n".join(body)))
         elif c in "()":
             flush()
             toks.append(("o", c))
@@ -215,9 +241,11 @@ def tokenize(cmd):
 
 
 def parse(cmd, depth=0):
-    """按引号外的操作符拆成一段段命令。返回 (段列表, 有没有写文件的重定向)。"""
+    """按引号外的操作符拆成一段段命令。
+    返回 (段列表, 有没有写文件的重定向)；每段是 (词列表, 喂给它的 heredoc / here-string 正文列表)。"""
     toks = tokenize(cmd)
-    segs, nested, writes, cond, i = [[]], [], False, False, 0
+    segs, nested, writes, cond, i = [([], [])], [], False, False, 0
+    pending = []  # 还没读到正文的 heredoc 属于哪一段
     while i < len(toks):
         kind, text = toks[i]
         nxt = toks[i + 1] if i + 1 < len(toks) else ("o", "")
@@ -226,13 +254,17 @@ def parse(cmd, depth=0):
                 cond = True
             elif text == "]]":
                 cond = False
-            segs[-1].append(text)
+            segs[-1][0].append(text)
             i += 1
         elif kind == "s":
-            if depth < 5:
+            if depth < MAX_DEPTH:
                 sub, sub_writes = parse(text, depth + 1)
                 nested += sub
                 writes = writes or sub_writes
+            i += 1
+        elif kind == "h":
+            if pending:
+                pending.pop(0)[1].append(text)
             i += 1
         elif cond and text in ("<", ">", "&&", "||", "(", ")"):
             i += 1  # [[ a > b && c ]] 里是比较和逻辑运算，不是重定向
@@ -243,47 +275,163 @@ def parse(cmd, depth=0):
                 writes = True
             i += 2 if nxt[0] == "w" else 1
         elif text in READ_OPS:
+            if text in ("<<", "<<-"):
+                pending.append(segs[-1])
+            elif text == "<<<" and nxt[0] == "w":
+                segs[-1][1].append(nxt[1])
             i += 2 if nxt[0] == "w" else 1  # 读入重定向，不算写文件
         else:
-            segs.append([])  # ; | && || & 换行 括号：后面是另一条命令
+            segs.append(([], []))  # ; | && || & 换行 括号：后面是另一条命令
             i += 1
-    return [s for s in segs + nested if s], writes
+    return [s for s in segs + nested if s[0]], writes
 
 
-def strip_prefix(words):
-    """去掉命令前面不算数的东西：VAR=值、do / then 这类关键字、rtk / sudo / xargs 这类包装器。"""
-    words = list(words)
-    while words:
-        w = words[0]
-        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w) or w in KEYWORDS:
-            words = words[1:]
-            continue
-        base = os.path.basename(w)
-        if base == "command" and words[1:2] in (["-v"], ["-V"]):
-            break  # command -v xxx 只是查命令在不在
-        if base in WRAPPERS and len(words) > 1:
-            words = words[1:]
-            while words and words[0].startswith("-"):
-                skip = 2 if base == "xargs" and words[0] in XARGS_VALUE_OPTS else 1
-                words = words[skip:]
-            continue
-        break
+def _skip_opts(words, value_opts):
+    """去掉开头的选项（value_opts 里的选项连同后面的值一起去掉）。遇到 -- 去掉它就停。"""
+    while words and words[0].startswith("-") and words[0] != "-":
+        if words[0] == "--":
+            return words[1:]
+        words = words[2:] if words[0] in value_opts else words[1:]
     return words
 
 
-def commands(cmd):
-    """返回命令里每一段的词列表（已去掉前缀），和有没有写文件的重定向。"""
+def unwrap(words):
+    """剥掉命令前面不算数的东西，剥到真正的命令为止。返回 (命令的词列表, 前面设的环境变量)。
+    包括：VAR=值；do / then / ! / { / time 这类关键字；env、sudo、rtk（含 rtk proxy）、command、exec、
+    nohup、timeout、nice、xargs 等包装器和它们的选项。"""
+    words, assigns = list(words), {}
+    while words:
+        w = words[0]
+        m = ASSIGN_RE.match(w)
+        if m:
+            assigns[m.group(1)] = w[len(m.group(0)):]
+            words = words[1:]
+            continue
+        if w in KEYWORDS:
+            words = _skip_opts(words[1:], set()) if w == "time" else words[1:]
+            continue
+        base = os.path.basename(w)
+        if base not in WRAPPER_OPTS or len(words) == 1:
+            break
+        if base == "command" and any(x in ("-v", "-V") for x in words[1:3]):
+            break  # command -v xxx 只是查命令在不在
+        rest = words[1:]
+        if base == "env":
+            while rest and (rest[0].startswith("-") or ASSIGN_RE.match(rest[0])):
+                a = rest[0]
+                if a in ("-S", "--split-string") and len(rest) > 1:
+                    rest = rest[1].split() + rest[2:]  # env -S "git push" 把字符串拆成命令
+                    continue
+                if a.startswith("--split-string="):
+                    rest = a.split("=", 1)[1].split() + rest[1:]
+                    continue
+                m = ASSIGN_RE.match(a)
+                if m:
+                    assigns[m.group(1)] = a[len(m.group(0)):]
+                    rest = rest[1:]
+                elif a == "--":
+                    rest = rest[1:]
+                    break
+                else:
+                    rest = rest[2:] if a in WRAPPER_OPTS["env"] else rest[1:]
+        elif base == "rtk":
+            rest = rest[1:] if rest and rest[0] == "proxy" else rest
+        else:
+            rest = _skip_opts(rest, WRAPPER_OPTS[base])
+            if base in ("timeout", "gtimeout") and rest:
+                rest = rest[1:]  # 时长
+        words = rest
+    return words, assigns
+
+
+def shell_script(words, bodies):
+    """bash / sh -c "..."、eval "..."、喂给 shell 的 heredoc：返回里面要另外检查的命令文字列表。"""
+    base = os.path.basename(words[0])
+    if base == "eval":
+        return [" ".join(words[1:])]
+    if base not in SHELLS:
+        return []
+    args, want_c = words[1:], False
+    while args:
+        a = args[0]
+        if a in ("-o", "+o", "-O", "+O"):
+            args = args[2:]
+            continue
+        if a.startswith("-") and not a.startswith("--") and len(a) > 1:
+            want_c = want_c or "c" in a[1:]
+            args = args[1:]
+            continue
+        if a.startswith("--") or a.startswith("+"):
+            args = args[1:]
+            continue
+        break
+    if want_c:
+        return args[:1]
+    if not args or args[0] in ("-", "/dev/stdin"):
+        return list(bodies)  # 没给脚本文件：从标准输入读命令
+    return []
+
+
+def find_exec(words):
+    """find 的 -exec / -execdir / -ok 后面跟的命令。"""
+    out, i = [], 1
+    while i < len(words):
+        if words[i] in ("-exec", "-execdir", "-ok", "-okdir"):
+            j = i + 1
+            while j < len(words) and words[j] not in (";", "+"):
+                j += 1
+            if j > i + 1:
+                out.append(words[i + 1:j])
+            i = j
+        i += 1
+    return out
+
+
+def segments(cmd, depth=0):
+    """返回 [(命令的词列表, 前面设的环境变量)]，包括 $( )、反引号、括号、bash -c、eval、
+    喂给 shell 的 heredoc、find -exec 里的命令；和有没有写文件的重定向。拆不了抛 ValueError。"""
     segs, writes = parse(cmd)
-    return [w for w in (strip_prefix(s) for s in segs) if w], writes
+    out = []
+    for raw, bodies in segs:
+        words, assigns = unwrap(raw)
+        if not words:
+            continue
+        out.append((words, assigns))
+        if depth >= MAX_DEPTH:
+            continue
+        for script in shell_script(words, bodies):
+            sub, sub_writes = segments(script, depth + 1)
+            out += sub
+            writes = writes or sub_writes
+        if os.path.basename(words[0]) == "find":
+            for inner in find_exec(words):
+                w, a = unwrap(inner)
+                if w:
+                    out.append((w, a))
+    return out, writes
+
+
+def commands(cmd):
+    """返回命令里每一段的词列表（已剥掉包装器），和有没有写文件的重定向。"""
+    segs, writes = segments(cmd)
+    return [w for w, _ in segs], writes
 
 
 def git_parts(words):
-    """words[0] 是 git。返回 (子命令, 子命令后面的参数, -C 指定的目录或 None)。"""
-    rest, cdir = words[1:], None
+    """words[0] 是 git。返回 (子命令, 子命令后面的参数, 仓库位置或 None)。
+    仓库位置来自 -C（可叠加）、--git-dir、--work-tree。"""
+    rest, cdir, where = words[1:], None, None
     while rest and rest[0].startswith("-"):
-        if rest[0] == "-C" and len(rest) > 1:
+        a = rest[0]
+        if a == "-C" and len(rest) > 1:
             cdir = os.path.join(cdir, rest[1]) if cdir else rest[1]
-        rest = rest[2:] if rest[0] in GIT_VALUE_OPTS else rest[1:]
+        elif a in ("--git-dir", "--work-tree") and len(rest) > 1:
+            where = where or rest[1]
+        elif a.startswith("--git-dir=") or a.startswith("--work-tree="):
+            where = where or a.split("=", 1)[1]
+        rest = rest[2:] if a in GIT_VALUE_OPTS else rest[1:]
+    if where:
+        cdir = os.path.join(cdir, where) if cdir else where
     return (rest[0] if rest else ""), rest[1:], cdir
 
 
@@ -378,8 +526,40 @@ def check_lead_bash(cmd):
 
 # ---------- 上传类命令 ----------
 
+GH_API_MERGE = re.compile(r"(^|/)pulls/[^/]+/merge/?$|(^|/)merges/?$")
+GH_API_REFS = re.compile(r"(^|/)git/refs(/|$)")
+
+
+def _gh_api_kind(args):
+    """gh api 的写操作：合并 PR、改分支指向。返回 pr-merge / api-refs 或 None。"""
+    paths = positional(args, {"-X", "--method", "-H", "--header", "-f", "--raw-field", "-F", "--field",
+                              "--input", "-q", "--jq", "-t", "--template", "--hostname", "--cache",
+                              "-p", "--preview"})
+    method = ""
+    for i, a in enumerate(args):
+        if a in ("-X", "--method") and i + 1 < len(args):
+            method = args[i + 1].upper()
+        elif a.startswith("--method="):
+            method = a.split("=", 1)[1].upper()
+        elif a.startswith("-X") and len(a) > 2:
+            method = a[2:].upper()
+    has_fields = any(a in ("-f", "-F", "--field", "--raw-field", "--input") or a.startswith("--field=")
+                     or a.startswith("--raw-field=") for a in args)
+    writes = method in ("POST", "PUT", "PATCH", "DELETE") or (not method and has_fields)
+    if not writes:
+        return None
+    for p in paths:
+        p = p.split("?", 1)[0]
+        if GH_API_MERGE.search(p):
+            return "pr-merge"
+        if GH_API_REFS.search(p):
+            return "api-refs"
+    return None
+
+
 def ship_action(words):
-    """这段命令是不是上传类。返回 (种类, 参数, -C 目录) 或 None。种类：merge / push / pr-create / pr-merge。"""
+    """这段命令是不是上传类。返回 (种类, 参数, 仓库位置) 或 None。
+    种类：merge / push / pr-create / pr-merge / api-refs（gh api 直接改远端分支）。"""
     if not words:
         return None
     first = os.path.basename(words[0])
@@ -387,8 +567,13 @@ def ship_action(words):
         sub, args, cdir = git_parts(words)
         if sub in ("merge", "push"):
             return sub, args, cdir
-    elif first == "gh" and words[1:3] in (["pr", "create"], ["pr", "merge"]):
-        return "pr-" + words[2], words[3:], None
+    elif first == "gh":
+        if words[1:3] in (["pr", "create"], ["pr", "merge"]):
+            return "pr-" + words[2], words[3:], None
+        if words[1:2] == ["api"]:
+            kind = _gh_api_kind(words[2:])
+            if kind:
+                return kind, words[2:], None
     return None
 
 
@@ -396,17 +581,19 @@ def has_ship(cmd):
     try:
         cmds, _ = commands(cmd)
     except ValueError:
-        return False
+        return False  # 拆不了的命令 shell 自己也跑不了
     return any(ship_action(words) for words in cmds)
 
 
 def _cd(cur, words):
-    """跟着命令里的 cd 走，后面的 git 才能在对的仓库里查。看不懂的路径就不动。"""
-    args = [w for w in words[1:] if w != "--"]
-    if len(args) != 1 or "$" in args[0] or "`" in args[0]:
-        return cur
+    """跟着命令里的 cd / pushd 走，后面的 git 才能在对的仓库里查。看不懂的路径返回 None。"""
+    args = [w for w in words[1:] if w != "--" and not (w.startswith("-") and len(w) > 1)]
+    if not args:
+        return os.path.expanduser("~")
+    if len(args) != 1 or "$" in args[0] or "`" in args[0] or args[0] == "-" or cur is None:
+        return None
     path = os.path.normpath(os.path.join(cur, os.path.expanduser(args[0])))
-    return path if os.path.isdir(path) else cur
+    return path if os.path.isdir(path) else None
 
 
 def current_branch(cwd):
@@ -433,6 +620,14 @@ def push_refspecs(args):
     return [s.lstrip("+") for s in positional(args, PUSH_VALUE_OPTS)[1:]]
 
 
+def _push_all(args):
+    return any(a in ("--all", "--branches", "--mirror") for a in args)
+
+
+def _push_delete(args):
+    return "--delete" in args or "-d" in args
+
+
 def _push_dst(spec, cur):
     """一个 refspec 推到远端的哪个分支：「本地:远端」取冒号后面，HEAD 就是当前分支。"""
     dst = spec.split(":", 1)[1] if ":" in spec else spec
@@ -442,29 +637,32 @@ def _push_dst(spec, cur):
 
 
 def check_semi(cwd, kind, args):
-    """半自动：不直接合并进默认分支、不直接推默认分支。没有远端的本地仓库不受限制。"""
+    """半自动：不直接合并进默认分支、不直接推默认分支、不用 gh 合并 PR。没有远端的本地仓库不受限制。"""
+    how = "开 PR 等用户点合并。做法：推任务分支，再 gh pr create。用户说「全自动」可以切回去。"
+    if kind in ("pr-merge", "api-refs"):
+        return "半自动模式：PR 由用户自己点合并，负责人不合并 PR、不直接改远端分支。用户说「全自动」可以切回去。"
     if kind not in ("merge", "push") or not remotes(cwd):
         return None
     default = default_branch(cwd)
     if not default:
         return None
     cur = current_branch(cwd)
-    how = "开 PR 等用户点合并。做法：推任务分支，再 gh pr create。用户说「全自动」可以切回去。"
     if kind == "merge":
         if cur == default and positional(args, MERGE_VALUE_OPTS):
             return f"半自动模式：不直接合并进 {default}，{how}"
         return None
-    if "--delete" in args or "-d" in args:
+    if _push_delete(args):
         return None
     specs = push_refspecs(args)
-    if "--all" in args or "--mirror" in args:
+    if _push_all(args):
         hit = True
     elif specs:
         hit = default in [_push_dst(s, cur) for s in specs]
     elif "--tags" in args:
         hit = False  # 只推标签
     else:
-        hit = cur == default
+        up = git(cwd, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}") or ""
+        hit = cur == default or up.split("/", 1)[-1] == default
     if hit:
         return f"半自动模式：不直接推 {default}，{how}"
     return None
@@ -487,10 +685,34 @@ def upload_base(cwd, tip):
     return None
 
 
+def resolves(cwd, ref):
+    return bool(git(cwd, "rev-parse", "--verify", "--quiet", ref + "^{commit}"))
+
+
+def clean_merge(cwd, sha):
+    """合并提交的内容是不是两边自动合出来的（没夹带别的改动）。git 太旧没法判断时按是处理。"""
+    parents = (git(cwd, "rev-list", "--parents", "-n", "1", sha) or "").split()[1:]
+    if len(parents) != 2:
+        return False  # 章鱼合并或查不到：要审
+    try:
+        r = subprocess.run(["git", "merge-tree", "--write-tree", *parents], cwd=cwd,
+                           capture_output=True, text=True, timeout=15)
+    except Exception:
+        return False
+    if r.returncode not in (0, 1):
+        return True  # git 太旧，不支持 --write-tree：沿用「合并提交不用审」
+    tree = git(cwd, "rev-parse", sha + "^{tree}")
+    return r.returncode == 0 and bool(tree) and r.stdout.split()[:1] == [tree]
+
+
 def unreviewed(cwd, rng, passed):
-    """范围里还没通过审核的提交（不算合并提交）。查不了时返回空。"""
-    revs = git(cwd, "rev-list", "--no-merges", rng, "--")
-    return [s for s in (revs or "").split() if s not in passed]
+    """范围里还没通过审核的提交。两边自动合出来的合并提交不用审；夹带改动的合并提交要审。
+    git 查不出来时返回 None（调用的地方按查不了处理，不当成通过）。"""
+    revs = git(cwd, "rev-list", rng, "--")
+    if revs is None:
+        return None
+    merges = set((git(cwd, "rev-list", "--merges", rng, "--") or "").split())
+    return [s for s in revs.split() if s not in passed and not (s in merges and clean_merge(cwd, s))]
 
 
 def review_msg(cwd, what, branch, base, count):
@@ -502,20 +724,42 @@ def review_msg(cwd, what, branch, base, count):
     )
 
 
+CANT_CHECK = "守卫查不出这次要{what}哪些提交，不能放行。"
+
+
+def _push_tips(cwd, args):
+    """git push 要推的本地提交：refspec 冒号前面的部分；--all 是所有分支，--tags 加上所有标签。"""
+    if _push_all(args):
+        tips = (git(cwd, "for-each-ref", "--format=%(refname:short)", "refs/heads") or "").split()
+    else:
+        tips = [s.split(":", 1)[0] for s in push_refspecs(args)]
+    if "--tags" in args or "--mirror" in args:
+        tips += (git(cwd, "for-each-ref", "--format=%(refname)", "refs/tags") or "").split()
+    if not tips and not _push_all(args) and "--tags" not in args:
+        tips = ["HEAD"]
+    return tips
+
+
 def check_reviewed(cwd, kind, args):
     """上传关：要合并 / 上传的提交必须都在审核通过记录里。只查记录，不跑 Codex。"""
     passed = records.passed_commits(cwd)
+    if kind == "api-refs":
+        return "守卫查不了用 gh api 直接改远端分支要上传哪些提交。改用 git push，守卫会先查审核记录。"
     if kind == "merge":
         for branch in positional(args, MERGE_VALUE_OPTS):
+            if not resolves(cwd, branch):
+                continue  # 分支不存在，git 自己会报错
             missing = unreviewed(cwd, f"HEAD..{branch}", passed)
+            if missing is None:
+                return CANT_CHECK.format(what="合并")
             if missing:
                 return review_msg(cwd, "合并", branch, current_branch(cwd) or "HEAD", len(missing))
         return None
     tips = ["HEAD"]
     if kind == "push":
-        if "--delete" in args or "-d" in args:
+        if _push_delete(args):
             return None
-        tips = [s.split(":", 1)[0] for s in push_refspecs(args)] or ["HEAD"]
+        tips = _push_tips(cwd, args)
     elif kind == "pr-create":
         for i, a in enumerate(args):
             if a in ("--head", "-H") and i + 1 < len(args):
@@ -525,13 +769,19 @@ def check_reviewed(cwd, kind, args):
     for tip in tips:
         if not tip:
             continue  # 「:分支」是删远端分支，没有要上传的提交
+        if any(c in tip for c in "*?["):
+            return "守卫查不了带通配符的推送。一个分支一个分支地推。"
+        if not resolves(cwd, tip):
+            continue  # 本地没有这个分支或提交，git 自己会报错
         base = upload_base(cwd, tip)
         if not base:
             continue  # 纯本地仓库或第一次推送，查不了
         missing = unreviewed(cwd, f"{base}..{tip}", passed)
+        what = "推送" if kind == "push" else "开 PR / 合并 PR"
+        if missing is None:
+            return CANT_CHECK.format(what=what)
         if missing:
             branch = git(cwd, "rev-parse", "--abbrev-ref", tip) or tip
-            what = "推送" if kind == "push" else "开 PR / 合并 PR"
             return review_msg(cwd, what, branch, base, len(missing))
     return None
 
@@ -539,22 +789,32 @@ def check_reviewed(cwd, kind, args):
 def check_ship(cwd, cmd, auto):
     """负责人的上传关和半自动限制。返回拦截原因或 None。"""
     try:
-        cmds, _ = commands(cmd)
+        segs, _ = segments(cmd)
     except ValueError:
-        return None
+        return None  # 拆不了的命令已经被黑名单拦了
     codex_off = os.environ.get("AGENT_DEV_TEAM_CODEX", "").lower() == "off"
     cur = cwd
-    for words in cmds:
-        if words[0] == "cd":
+    for words, assigns in segs:
+        if words[0] in ("cd", "pushd"):
             cur = _cd(cur, words)
             continue
         action = ship_action(words)
         if not action:
             continue
         kind, args, cdir = action
-        where = os.path.join(cur, os.path.expanduser(cdir)) if cdir else cur
+        if auto == "semi" and kind in ("pr-merge", "api-refs"):
+            return check_semi(cwd, kind, args)
+        env_dir = assigns.get("GIT_DIR") or assigns.get("GIT_WORK_TREE")
+        if cdir and env_dir:
+            loc = os.path.join(os.path.expanduser(env_dir), os.path.expanduser(cdir))
+        else:
+            loc = os.path.expanduser(cdir or env_dir or "")
+        if cur is None and not os.path.isabs(loc):
+            return ("守卫看不出这条命令在哪个目录里跑（前面的 cd 用了变量或看不懂的路径）。"
+                    "改用 git -C <绝对路径> 再试。")
+        where = os.path.join(cur or "/", loc) if loc else cur
         if git(where, "rev-parse", "--git-dir") is None:
-            continue  # 不在仓库里，查不了
+            continue  # 不在仓库里，git 自己也跑不了
         reason = check_semi(where, kind, args) if auto == "semi" else None
         if not reason and not codex_off:
             reason = check_reviewed(where, kind, args)

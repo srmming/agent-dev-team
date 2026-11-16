@@ -147,7 +147,9 @@ class LeadFlow(unittest.TestCase):
         self.assertEqual((code, out.splitlines()[0]), (0, "审核：通过"), out)
         with open(self.calls_file, encoding="utf-8") as f:
             call = json.loads(f.readline())
-        self.assertIn("git diff main...feat", call["args"][-1])  # 提示词是最后一个参数
+        main_sha = self.git(self.repo, "rev-parse", "main")
+        feat_sha = self.git(self.repo, "rev-parse", "feat")
+        self.assertIn(f"git diff {main_sha}...{feat_sha}", call["args"][-1])  # 提示词是最后一个参数，用固定提交号
         self.assertIn("VERDICT: PASS", call["args"][-1])
 
         # 3. 同一条合并命令放行，真的合并

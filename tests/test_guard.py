@@ -761,6 +761,165 @@ class SemiAutoTest(GuardCase):
         self.allow(self.repo, "git merge feat")
         self.allow(self.repo, "git push")
 
+    def test_半自动下用gh合并PR一律拦(self):
+        for cmd in ("gh pr merge 123 --squash", "gh pr merge", "rtk proxy gh pr merge 1",
+                    "gh api -X PUT repos/o/r/pulls/1/merge", "bash -c 'gh pr merge 1'"):
+            self.deny(self.repo, cmd, "用户自己点合并")
+            self.deny(self.repo, cmd, "用户自己点合并", env={"AGENT_DEV_TEAM_CODEX": "off"})
+        plain = self.make_dir("plain")
+        self.deny(plain, "gh pr merge 1 -R o/r", "用户自己点合并")  # 不在仓库里也拦
+        self.allow(self.repo, "gh pr view 123")
+        self.allow(self.repo, "gh pr create --head feat --fill")
+
+    def test_半自动_推送跟着上游推到主分支也拦(self):
+        self.git(self.repo, "branch", "-q", "--set-upstream-to=origin/main", "feat")
+        wt = os.path.join(self.tmp, "wt-semi")
+        self.git(self.repo, "worktree", "add", "-q", wt, "feat")
+        self.deny(wt, "git push", "不直接推 main")
+        self.deny(self.repo, "git push --branches origin", "不直接推 main")
+
+
+class WrapperBypassTest(GuardCase):
+    """包装器、子 shell、bash -c 这类写法都要认出真正的命令（Codex 第 1 轮发现的回归）。"""
+
+    SHIPS = [
+        "env -u TEST git push origin main",
+        "env -i PATH=/usr/bin git push",
+        "env -S 'git push'",
+        "env --unset=X -- git push",
+        "rtk proxy git push origin main",
+        "sudo -u bob git push",
+        "timeout 30 git push",
+        "timeout -s KILL -k 5 30 git push",
+        "nice -n 5 git push",
+        "time -p git push",
+        "nohup git push &",
+        "command git push",
+        "exec git push",
+        "stdbuf -o0 git push",
+        "ls | xargs -n1 git push",
+        "bash -c 'git push'",
+        'sh -lc "cd /x && git push"',
+        "zsh -ec 'gh pr merge 1'",
+        "eval 'git push'",
+        "bash <<EOF\ngit push\nEOF",
+        "sh -s <<'EOF'\ngit merge feat\nEOF",
+        "bash <<< 'git push'",
+        "find . -maxdepth 0 -exec git push \\;",
+        "git --git-dir=/x/.git push",
+        "git --work-tree /x merge feat",
+        "! git push",
+        "{ git push; }",
+        "(git push)",
+        "true && (cd /x; git push)",
+        "echo `git push`",
+        "x=$(git push)",
+        "gh api -X PUT repos/o/r/pulls/1/merge",
+        "gh api --method=POST repos/o/r/merges -f base=main -f head=x",
+        "gh api repos/o/r/git/refs/heads/main -X PATCH -f sha=abc",
+        "env FOO=1 bash -c 'env -u X rtk proxy git push'",
+    ]
+    NOT_SHIPS = [
+        "python3 - <<EOF\ngit push\nEOF",
+        "cat <<EOF\ngit push\nEOF",
+        "git commit -F - <<'EOF'\n说明里提到 git push\nEOF",
+        "bash script.sh",
+        "bash -c 'echo git push'",
+        "gh api repos/o/r/pulls/1",
+        "gh api repos/o/r/pulls/1/merge",
+        "env",
+        "command -v git",
+        "timeout 30 ls",
+        "time -p ls",
+    ]
+
+    def test_子代理认得出包装后的上传命令(self):
+        for cmd in self.SHIPS:
+            self.assertTrue(has_ship(cmd), cmd)
+        for cmd in self.NOT_SHIPS:
+            self.assertFalse(has_ship(cmd), cmd)
+        repo = self.make_repo()
+        self.set_state(role="subagent")
+        for cmd in ("env -u TEST git push origin main", "rtk proxy git push origin main", "bash -c 'git push'"):
+            self.deny(repo, cmd, "子代理不能 push")
+        self.set_state(role="kuaixiu")
+        self.deny(repo, "timeout 30 git push", "对接窗口不能 push")
+
+    def test_负责人黑名单也剥包装器_也查bash_c(self):
+        for cmd, word in (("env -u X rm y", "`rm`"), ("timeout 5 rm x", "`rm`"), ("rtk proxy rm x", "`rm`"),
+                          ("time -p cp a b", "`cp`"), ("bash -c 'rm x'", "`rm`"),
+                          ("sh -c \"echo a > b\"", "重定向"), ("eval 'git commit -m x'", "git commit"),
+                          ("bash <<EOF\nrm x\nEOF", "`rm`"), ("sudo -u bob touch x", "`touch`"),
+                          ("nice -n 1 git add .", "git add")):
+            reason = check_lead_bash(cmd)
+            self.assertIsNotNone(reason, cmd)
+            self.assertIn(word, reason, cmd)
+        for cmd in ("bash -c 'ls -la'", "bash script.sh", "sh -c 'git status'", "python3 - <<EOF\nrm = 1\nEOF"):
+            self.assertIsNone(check_lead_bash(cmd), cmd)
+
+
+class UploadGateMoreTest(GuardCase):
+    """上传关的其他写法：推全部分支、推标签、通配符、GIT_DIR、夹带改动的合并提交、看不懂的 cd。"""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = self.make_repo_with_remote()
+
+    def test_包装器和bash_c里的上传也查审核(self):
+        self.commit(self.repo)
+        for cmd in ("env -u X git push", "rtk proxy git push", "bash -c 'git push'", "timeout 9 git push"):
+            self.deny(self.repo, cmd, "还没通过 Codex 审核")
+
+    def test_推全部分支_推标签_通配符(self):
+        a = self.commit(self.repo, "feat")
+        self.deny(self.repo, "git push --all origin", "审核")
+        self.git(self.repo, "tag", "v1", a)
+        self.deny(self.repo, "git push --tags", "审核")
+        self.deny(self.repo, "git push origin 'refs/heads/*:refs/heads/*'", "通配符")
+        self.passed(self.repo, a)
+        self.allow(self.repo, "git push --all origin")
+        self.allow(self.repo, "git push --tags")
+
+    def test_GIT_DIR和git_dir指到仓库也查(self):
+        self.commit(self.repo)
+        plain = self.make_dir("plain")
+        gitdir = os.path.join(self.repo, ".git")
+        self.deny(plain, f"GIT_DIR={gitdir} git push", "审核")
+        self.deny(plain, f"git --git-dir={gitdir} push", "审核")
+        self.deny(plain, f"env GIT_DIR={gitdir} git push", "审核")
+
+    def test_看不懂的cd后面的上传_拦下要求写绝对路径(self):
+        self.commit(self.repo)
+        plain = self.make_dir("plain")
+        self.deny(plain, 'cd "$REPO" && git push', "git -C <绝对路径>")
+        self.deny(plain, f"pushd {self.repo} && git push", "审核")
+
+    def test_夹带改动的合并提交要审_干净的合并不用(self):
+        a = self.commit(self.repo, "feat")
+        self.passed(self.repo, a)
+        # 手搓一个合并提交：父提交都审过，但内容多了一个文件
+        self.write(os.path.join(self.repo, "evil.txt"), "x")
+        self.git(self.repo, "add", "evil.txt")
+        tree = self.git(self.repo, "write-tree")
+        self.git(self.repo, "rm", "-q", "--cached", "evil.txt")
+        os.remove(os.path.join(self.repo, "evil.txt"))
+        m = self.git(self.repo, "commit-tree", tree, "-p", "main", "-p", "feat", "-m", "merge")
+        self.git(self.repo, "update-ref", "refs/heads/evil", m)
+        self.deny(self.repo, "git merge evil", "有 1 个提交")
+        self.passed(self.repo, m)
+        self.allow(self.repo, "git merge evil")
+        # 干净的合并（两边自动合出来的）不用审
+        self.git(self.repo, "merge", "-q", "--no-ff", "feat", "-m", "merge feat")
+        self.allow(self.repo, "git push")
+
+    def test_守卫一秒内完成(self):
+        import time
+        for _ in range(20):
+            self.commit(self.repo)
+        start = time.monotonic()
+        self.deny(self.repo, "git push", "审核")
+        self.assertLess(time.monotonic() - start, 2.0)  # 留余量给慢机器，正常远小于 1 秒
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

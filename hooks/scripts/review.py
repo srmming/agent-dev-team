@@ -17,6 +17,7 @@ import records  # noqa: E402
 DEFAULT_CMD = "codex exec --sandbox read-only -c model_reasoning_effort=max"
 TIMEOUT = 1800
 MAX_LINES = 60
+VERDICT_RE = re.compile(r"^[\s*#>`_-]*VERDICT:\s*\**\s*(PASS|FAIL)\b", re.MULTILINE)
 
 
 def default_branch(cwd):
@@ -63,15 +64,32 @@ def main(argv=None):
     if not base:
         print("审核：出错（不计入失败轮数）\n找不到主分支，请用 --base 指定")
         return 2
+    # 开跑前把基准和分支固定成提交号：审核期间分支上再加的提交不会被算进这次通过
+    shas = []
     for ref in (base, a.branch):
-        if not git(cwd, "rev-parse", "--verify", "--quiet", ref + "^{commit}"):
+        sha = git(cwd, "rev-parse", "--verify", "--quiet", ref + "^{commit}")
+        if not sha:
             print(f"审核：出错（不计入失败轮数）\n找不到分支或提交 {ref}")
             return 2
+        shas.append(sha)
+    base_sha, branch_sha = shas
 
-    rng = f"{base}...{a.branch}"
-    if not git(cwd, "diff", "--stat", rng):
-        print("审核：没有改动")
+    commits = git(cwd, "rev-list", f"{base_sha}..{branch_sha}")
+    diff = git(cwd, "diff", "--stat", f"{base_sha}...{branch_sha}")
+    if commits is None or diff is None:
+        print(f"审核：出错（不计入失败轮数）\ngit 查不出 {base}...{a.branch} 的改动")
+        return 2
+    commits = commits.split()
+    if not diff:
+        if commits:
+            # 有提交但合起来没改任何文件（空提交、改了又撤销）：没什么可审，记为通过，免得守卫一直拦
+            records.add_passed(cwd, commits)
+            records.clear_fails(cwd, a.branch)
+            print(f"审核：没有改动\n{len(commits)} 个提交合起来没有改任何文件，已记为通过。")
+        else:
+            print("审核：没有改动")
         return 0
+    rng = f"{base_sha}...{branch_sha}"
 
     cmd_text = review_cmd(root)
     try:
@@ -92,11 +110,19 @@ def main(argv=None):
         print(f"审核：出错（不计入失败轮数）\n审核超时（{TIMEOUT} 秒），稍后重试。")
         return 2
 
-    out = (r.stdout or "") + ("\n" + r.stderr if r.returncode != 0 and r.stderr else "")
-    verdicts = re.findall(r"VERDICT:\s*(PASS|FAIL)", out)
+    if r.returncode != 0:
+        # 审核命令自己出错（没登录、崩了）：不知道结论，不算通过也不计轮数
+        err = ((r.stderr or "") + "\n" + (r.stdout or "")).strip().splitlines()
+        print(f"审核：出错（不计入失败轮数）\n审核命令退出码 {r.returncode}，稍后重试。")
+        if err:
+            print("\n".join(err[-20:]))
+        return 2
+
+    out = r.stdout or ""
+    # 结论要单独成行（允许前面有 * # > 这类标记）；提示词里引用的那句不算
+    verdicts = VERDICT_RE.findall(out)
     if verdicts and verdicts[-1] == "PASS":
-        shas = (git(cwd, "rev-list", f"{base}..{a.branch}") or "").split()
-        records.add_passed(cwd, shas)
+        records.add_passed(cwd, commits)  # 开跑前固定的那批提交
         records.clear_fails(cwd, a.branch)
         print("审核：通过")
         return 0
@@ -113,4 +139,10 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001  脚本自己出错时给出明确结论，不让负责人当成别的结果
+        print('审核：出错（不计入失败轮数）' + "\n脚本自己出错：" + repr(e))
+        sys.exit(2)

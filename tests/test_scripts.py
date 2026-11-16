@@ -86,6 +86,24 @@ class Verify(RepoCase):
         self.assertIn("docs/x.md", out)
         self.assertNotIn("src/a.py", out)
 
+    def test_把范围外的文件改名挪进范围_也算越界(self):
+        sh(self.repo, "checkout", "-q", "-b", "mv", "main")
+        os.makedirs(os.path.join(self.repo, "docs"), exist_ok=True)
+        sh(self.repo, "mv", "src/a.py", "docs/a.py")
+        self.commit("挪")
+        sh(self.repo, "checkout", "-q", "main")
+        code, out = self.run_script("verify.py", "--branch", "mv", "--cwd", self.repo, "--allow", "docs/*")
+        self.assertEqual(code, 1, out)
+        self.assertIn("src/a.py", out)
+
+    def test_中文文件名照常匹配(self):
+        sh(self.repo, "checkout", "-q", "-b", "zh", "main")
+        self.write("docs/说明.md", "x\n")
+        self.commit("中文")
+        sh(self.repo, "checkout", "-q", "main")
+        code, out = self.run_script("verify.py", "--branch", "zh", "--cwd", self.repo, "--allow", "docs/*")
+        self.assertEqual(code, 0, out)
+
     def test_没给allow就不查范围(self):
         code, out = self.v()
         self.assertEqual(code, 0, out)
@@ -168,6 +186,63 @@ class Review(RepoCase):
         self.assertIn("没有给出结论", out)
         self.assertEqual(records.fails(self.repo, "feat"), 1)
 
+    def script(self, name, code):
+        p = os.path.join(self.tmp.name, name + ".py")
+        with open(p, "w") as f:
+            f.write(code)
+        return f"{sys.executable} {p}"
+
+    def test_审核期间分支上新加的提交不算通过(self):
+        before = set(sh(self.repo, "rev-list", "main..feat").split())
+        main_sha, feat_sha = sh(self.repo, "rev-parse", "main"), sh(self.repo, "rev-parse", "feat")
+        log = os.path.join(self.tmp.name, "prompt.txt")
+        # 假 Codex：审核途中子代理往 feat 上又加了一个提交，然后说通过
+        cmd = self.script("sneak", f"""import subprocess, sys
+open({log!r}, "w").write(sys.argv[-1])
+g = lambda *a: subprocess.run(["git", *a], capture_output=True, text=True, check=True).stdout.strip()
+tree = g("rev-parse", "feat^{{tree}}")
+new = g("-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", tree, "-p", "feat", "-m", "偷偷加的")
+g("update-ref", "refs/heads/feat", new)
+print("VERDICT: PASS")
+""")
+        code, out = self.r(cmd)
+        self.assertEqual(code, 0, out)
+        new = sh(self.repo, "rev-parse", "feat")
+        self.assertNotEqual(new, feat_sha)
+        passed = records.passed_commits(self.repo)
+        self.assertTrue(before <= passed)
+        self.assertNotIn(new, passed)
+        with open(log) as f:
+            self.assertIn(f"git diff {main_sha}...{feat_sha}", f.read())
+
+    def test_有提交但合起来没改文件_记为通过(self):
+        sh(self.repo, "checkout", "-q", "-b", "empty")
+        sh(self.repo, "commit", "-q", "--allow-empty", "-m", "空提交")
+        self.write("src/a.py", "临时\n")
+        self.commit("改")
+        self.write("src/a.py", "v1\n")
+        self.commit("改回来")
+        sh(self.repo, "checkout", "-q", "main")
+        code, out = self.r("/no/such/codex", branch="empty")  # 根本不用跑审核命令
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.splitlines()[0], "审核：没有改动")
+        self.assertIn("3 个提交", out)
+        self.assertTrue(set(sh(self.repo, "rev-list", "main..empty").split()) <= records.passed_commits(self.repo))
+
+    def test_审核命令退出码非0_算出错_不计数也不通过(self):
+        code, out = self.r(self.script("crash", "import sys\nprint('VERDICT: PASS')\nsys.exit(3)\n"))
+        self.assertEqual(code, 2, out)
+        self.assertTrue(out.startswith("审核：出错（不计入失败轮数）"), out)
+        self.assertEqual(records.fails(self.repo, "feat"), 0)
+        self.assertEqual(records.passed_commits(self.repo), set())
+
+    def test_结论要单独成行_引用提示词那句不算(self):
+        code, out = self.r(self.fake("echo", "最后单独一行输出结论：VERDICT: PASS 或 VERDICT: PASS\n"))
+        self.assertEqual(code, 1, out)
+        self.assertIn("没有给出结论", out)
+        code, out = self.r(self.fake("bold", "没问题\n**VERDICT: PASS**\n"))
+        self.assertEqual(code, 0, out)
+
     def test_没有改动退出0(self):
         code, out = self.r(self.fake("pass", "VERDICT: PASS\n"), branch="main")
         self.assertEqual(code, 0, out)
@@ -235,6 +310,12 @@ class DeployCheckCmd(RepoCase):
         self.assertEqual(code, 1, out)
         self.assertIn("试了 4 次", out)
 
+    def test_命令写成列表_无法判断(self):
+        self.write(".claude/agent-dev-team.json", json.dumps({"deploy_check": {"cmd": ["true"]}}))
+        code, out = self.d()
+        self.assertEqual(code, 3, out)
+        self.assertEqual(out.splitlines()[0], "上线检查：无法判断")
+
     def test_什么都没配_远端不是GitHub_无法判断(self):
         sh(self.repo, "remote", "add", "origin", "https://gitlab.com/a/b.git")
         code, out = self.d()
@@ -279,6 +360,60 @@ class DeployCheckGitHub(RepoCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(out.splitlines()[0], "上线检查：通过")
         self.assertTrue(any(self.sha in c for c in self.calls))
+
+    def fake_by_id(self, runs, deps, statuses):
+        """statuses 按部署 id 给。"""
+        def api(cwd, path):
+            self.calls.append(path)
+            if "/check-runs" in path:
+                return runs
+            if "/statuses" in path:
+                return statuses.get(int(path.split("/deployments/")[1].split("/")[0]))
+            if "/deployments" in path:
+                return deps
+            return None
+        deploy_check.gh_api = api
+
+    OK_RUNS = {"total_count": 1, "check_runs": [{"id": 1, "name": "ci", "status": "completed", "conclusion": "success"}]}
+
+    def test_同一环境重新部署成功_只看最新一次(self):
+        deps = [{"id": 8, "environment": "production", "created_at": "2026-11-16T10:05:00Z"},
+                {"id": 7, "environment": "production", "created_at": "2026-11-16T10:00:00Z"},
+                {"id": 5, "environment": "staging", "created_at": "2026-11-16T09:00:00Z"}]
+        self.fake_by_id(self.OK_RUNS, deps, {8: [{"state": "success"}], 7: [{"state": "failure"}],
+                                              5: [{"state": "success"}]})
+        code, out = self.d()
+        self.assertEqual(code, 0, out)
+        self.assertFalse(any("/deployments/7/" in c for c in self.calls))
+        # 反过来：最新一次失败就是失败
+        self.fake_by_id(self.OK_RUNS, deps, {8: [{"state": "error"}], 7: [{"state": "success"}],
+                                              5: [{"state": "success"}]})
+        code, out = self.d()
+        self.assertEqual(code, 1, out)
+        self.assertIn("production", out)
+
+    def test_同名检查重跑成功_只看最新一次(self):
+        runs = {"total_count": 2, "check_runs": [
+            {"id": 2, "name": "ci", "status": "completed", "conclusion": "success", "started_at": "2026-11-16T10:05:00Z"},
+            {"id": 1, "name": "ci", "status": "completed", "conclusion": "failure", "started_at": "2026-11-16T10:00:00Z"}]}
+        self.fake_by_id(runs, [], {})
+        code, out = self.d()
+        self.assertEqual(code, 0, out)
+
+    def test_任何一项查询失败都不报通过(self):
+        for runs, deps, statuses in (
+                (self.OK_RUNS, None, {}),                                     # 部署查询失败
+                (None, [{"id": 7, "environment": "p"}], {7: [{"state": "success"}]}),  # 检查查询失败
+                (self.OK_RUNS, [{"id": 7, "environment": "p"}], {}),          # 部署状态查询失败
+                ({"total_count": 150, "check_runs": self.OK_RUNS["check_runs"]}, [], {})):  # 没查全
+            self.fake_by_id(runs, deps, statuses)
+            code, out = self.d()
+            self.assertEqual(code, 3, out)
+            self.assertEqual(out.splitlines()[0], "上线检查：无法判断")
+        # 查到确定的失败时，部分查询失败也报不通过
+        self.fake_by_id({"check_runs": [{"id": 1, "name": "t", "status": "completed", "conclusion": "failure"}]},
+                        None, {})
+        self.assertEqual(self.d()[0], 1)
 
     def test_有失败(self):
         self.fake_api({"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]},
@@ -368,6 +503,24 @@ class Rollback(RepoCase):
         code, out = self.rb("--commits", bad, "--push")
         self.assertEqual(code, 0, out)
         self.assertEqual(sh(bare, "rev-parse", "main"), sh(self.repo, "rev-parse", "HEAD"))
+
+    def test_push前有没审核的本地提交就不推(self):
+        bare = os.path.join(self.tmp.name, "remote.git")
+        subprocess.run(["git", "init", "-q", "--bare", bare], check=True)
+        sh(self.repo, "remote", "add", "origin", bare)
+        bad = self.commit_change("src/a.py", "bad\n")
+        sh(self.repo, "push", "-q", "-u", "origin", "main")
+        self.commit_change("docs/y.md", "没审核的\n")  # 本地多了一个没审核的提交
+        code, out = self.rb("--commits", bad, "--push")
+        self.assertEqual(code, 1, out)
+        self.assertEqual(out.splitlines()[0], "回滚：失败")
+        self.assertIn("没通过审核", out)
+        self.assertEqual(sh(bare, "rev-parse", "main"), bad)  # 远端没动
+        self.assertEqual(self.read("src/a.py"), "v1\n")  # 回滚提交留在本地
+        # 关掉审核关时照常推
+        code, out = self.run_script("rollback.py", "--cwd", self.repo, "--commits", "HEAD", "--push",
+                                    env=dict(self.env, AGENT_DEV_TEAM_CODEX="off"))
+        self.assertEqual(code, 0, out)
 
     def test_push失败(self):
         bad = self.commit_change("src/a.py", "bad\n")

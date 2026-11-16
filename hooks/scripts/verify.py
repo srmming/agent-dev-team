@@ -70,11 +70,12 @@ def main(argv=None):
         if not git(cwd, "rev-parse", "--verify", "--quiet", ref + "^{commit}"):
             print(f"验收：出错\n找不到分支或提交 {ref}")
             return 2
-    diff = git(cwd, "diff", "--name-only", f"{base}...{a.branch}")
+    # --no-renames：改名时旧路径也算改动（不然把范围外的文件改名挪进范围里查不出来）；-z：中文文件名不被转义
+    diff = git(cwd, "diff", "--name-only", "--no-renames", "-z", f"{base}...{a.branch}")
     if diff is None:
         print(f"验收：出错\ngit diff {base}...{a.branch} 失败")
         return 2
-    files = [f for f in diff.splitlines() if f]
+    files = [f for f in diff.split("\0") if f]
 
     reasons = []
     if a.allow:
@@ -104,4 +105,10 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001  脚本自己出错时给出明确结论，不让负责人当成别的结果
+        print('验收：出错' + "\n脚本自己出错：" + repr(e))
+        sys.exit(2)

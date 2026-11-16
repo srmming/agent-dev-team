@@ -36,6 +36,18 @@ def fail(msg, done):
     return 1
 
 
+def unreviewed_to_push(cwd):
+    """git push 会推上去、又没通过审核的提交（和守卫的上传关同一个算法）。关掉审核关或查不了时返回 []。"""
+    if os.environ.get("AGENT_DEV_TEAM_CODEX", "").lower() == "off":
+        return []
+    import guard  # 用守卫同一套算法；放这里导入，回滚的其他部分不依赖它
+    base = guard.upload_base(cwd, "HEAD")
+    if not base:
+        return []  # 纯本地仓库或第一次推送，和守卫一样查不了
+    missing = guard.unreviewed(cwd, f"{base}..HEAD", records.passed_commits(cwd))
+    return ["（git 查不出要推的提交）"] if missing is None else missing
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="回滚：按顺序 git revert 给的提交（合并提交用 -m 1），只撤回代码。")
     ap.add_argument("--commits", nargs="+", required=True, help="要撤回的提交号，按给的顺序撤回")
@@ -70,6 +82,11 @@ def main(argv=None):
     records.add_passed(cwd, done)
 
     if a.push:
+        # 守卫看不到脚本里的 git push，这里自己查一遍：要推的提交里有没审核的就不推
+        missing = unreviewed_to_push(cwd)
+        if missing:
+            return fail(f"不推送：要推的提交里有 {len(missing)} 个没通过审核（{' '.join(s[:12] for s in missing[:5])}）。"
+                        "回滚提交已经在本地，先处理这些提交再推。", done)
         code, out = run_git(cwd, "push")
         if code != 0:
             return fail(f"git push 失败：\n{tail(out)}", done)
@@ -80,4 +97,10 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001  脚本自己出错时给出明确结论，不让负责人当成别的结果
+        print('回滚：失败' + "\n脚本自己出错：" + repr(e))
+        sys.exit(1)

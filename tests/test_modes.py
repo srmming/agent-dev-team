@@ -159,6 +159,21 @@ class RoleTest(Base):
         self.assertEqual(os.path.dirname(p), os.path.join(self.home, "sessions"))
 
 
+class SaveSessionTest(Base):
+    def test_好几个进程同时改_不丢键(self):
+        code = ("import sys; sys.path.insert(0, %r); import common\n"
+                "for i in range(20): common.save_session('s1', **{'k' + sys.argv[1]: i})" % SCRIPTS)
+        procs = [subprocess.Popen([sys.executable, "-c", code, str(n)], env=dict(os.environ)) for n in range(6)]
+        for p in procs:
+            self.assertEqual(p.wait(timeout=60), 0)
+        self.assertEqual(self.state("s1"), {f"k{n}": 19 for n in range(6)})
+
+    def test_坏文件被覆盖成好的(self):
+        self.write(self.session_file("s1"), "{坏的")
+        self.assertEqual(common.save_session("s1", role="normal"), {"role": "normal"})
+        self.assertEqual(self.state("s1"), {"role": "normal"})
+
+
 class AutoAndConfigTest(Base):
     def test_默认全自动(self):
         repo = self.make_repo()
