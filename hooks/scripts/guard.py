@@ -455,10 +455,10 @@ def unwrap(words):
 def cmd_name(word):
     """一个词当命令名时指的是哪个程序：去掉路径，转小写（macOS 的文件名不分大小写，GIT 也是 git），
     去掉 zsh 的 = 前缀（=git 是 git 的完整路径）。
-    路径是命令替换拼出来的："$(brew --prefix)/bin/git" 看替换后面那段，是 git；
-    "$(echo /usr/bin/git)" 整个都是替换出来的，原样返回（调用的地方会当成看不懂的命令名）。"""
-    if "$(" in word or "`" in word:
-        tail = re.split(r"[)`]", word)[-1]
+    路径是展开拼出来的："$(brew --prefix)/bin/git"、"${ROOT}/bin/git" 看展开后面那段，是 git；
+    "$(echo /usr/bin/git)"、"${GIT:-/usr/bin/git}" 整个都是展开出来的，原样返回（调用的地方会当成看不懂的命令名）。"""
+    if "$(" in word or "`" in word or "${" in word:
+        tail = re.split(r"[)`}]", word)[-1]
         if "/" not in tail:
             return word
         word = tail
