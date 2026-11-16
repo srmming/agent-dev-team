@@ -139,8 +139,8 @@ async function writeMode($: $, patch: { role?: string; auto?: string }): Promise
 function splitStatus(status: string): { big: string; small: string | null; node: boolean } {
   const m = /^([^:：]+)[:：](.*)$/.exec(status)
   if (m === null) return { big: status, small: null, node: false }
-  const small = m[2].trim()
-  return { big: m[1].trim(), small: small === '' ? null : small, node: true }
+  const small = (m[2] ?? '').trim()
+  return { big: (m[1] ?? '').trim(), small: small === '' ? null : small, node: true }
 }
 
 // 没写 status 时的默认说法
