@@ -13,32 +13,51 @@ from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import TAIL, default_branch, git, repo_root, run_shell, tail  # noqa: E402
 
-# 测试文件：在 tests/、test/、__tests__/ 目录下，或文件名像 test_*.py、*_test.py、*.test.*、*.spec.*
-TEST_DIRS = {"tests", "test", "__tests__"}
-TEST_NAMES = ("test_*.py", "*_test.py", "*.test.*", "*.spec.*")
-# 跳过标记：unittest 的 skip 系列（带不带 unittest. 前缀）、expectedFailure、SkipTest，
-# pytest 的 mark.skip/skipif/xfail（装饰器、pytestmark、marks= 都算）和 pytest.skip()，JS 的 .skip/.only/xit 等
+# 测试文件：在 tests/、test/、__tests__/、spec/ 目录下，或文件名符合常见约定：
+# Python test_*.py、*_test.py；JS/TS *.test.*、*.spec.*；Go *_test.go；Ruby *_spec.rb、*_test.rb、test_*.rb；
+# Java/Kotlin *Test.java、*Tests.kt、TestFoo.java 一类。不追求穷尽，也不加会误伤普通代码的宽泛规则（区分大小写）。
+TEST_DIRS = {"tests", "test", "__tests__", "spec"}
+TEST_NAMES = ("test_*.py", "test_*.rb", "*_test.*", "*_spec.*", "*.test.*", "*.spec.*",
+              "*Test.java", "*Tests.java", "Test*.java", "*Test.kt", "*Tests.kt", "Test*.kt")
+# 跳过标记：
+# Python unittest 的 skip 系列（带不带 unittest. 前缀）、expectedFailure、SkipTest，pytest 的 mark.skip/skipif/xfail、
+# pytest.skip() 和 pytest.importorskip()；JS 的 .skip/.only/xit/fit 等；
+# Go 的 t.Skip / SkipNow / Skipf；Ruby 行首的 skip / pending、xit / xdescribe、skip: 元数据；
+# Java/Kotlin 的 @Disabled、@Ignore、Assumptions.assume*
 SKIP_RE = re.compile(r"@unittest\.skip|@skip\b|\bskipIf\b|\bskipUnless\b|\bexpectedFailure\b|\bSkipTest\b"
-                     r"|\.skipTest\(|\bmark\.(skip|xfail)|pytest\.skip\("
-                     r"|\.skip\(|\.only\(|\bxit\(|\bxtest\(|\bxdescribe\(")
+                     r"|\.skipTest\(|\bmark\.(skip|xfail)|pytest\.skip\(|\bimportorskip\("
+                     r"|\.skip\(|\.only\(|\bxit\(|\bxtest\(|\bxdescribe\(|(?<![\w.])f(?:it|describe)\(\s*['\"`]"
+                     r"|\b(?:t|b|f|tb|s)\.Skip(?:Now|f)?\(|\bT\(\)\.Skip(?:Now|f)?\("
+                     r"|^\s*(?:skip|pending)(?:\s*\(?\s*['\"]|\s*$|\s+(?:if|unless)\b)"
+                     r"|^\s*[xf](?:it|describe|context|specify)\s+['\"]|,\s*skip:\s*(?:true|['\"])"
+                     r"|@Disabled\w*|@Ignore\b|\bAssumptions?\.assume\w*\(|^\s*assume(?:True|False|That)\(")
 
 
 def is_test_file(path):
     parts = path.split("/")
-    return bool(TEST_DIRS & set(parts[:-1])) or any(fnmatch.fnmatch(parts[-1], p) for p in TEST_NAMES)
+    return bool(TEST_DIRS & set(parts[:-1])) or any(fnmatch.fnmatchcase(parts[-1], p) for p in TEST_NAMES)
+
+
+class ReadError(Exception):
+    """旧文件读不出来（不是不存在，也不是空文件）：没有比较的依据，验收不能往下走。"""
 
 
 def file_lines(cwd, ref, path):
-    """ref 里这个文件的各行（原文：不去首尾空白，\r 留在行里）；文件不存在返回 None，读不出来返回空列表。
-    不用 common.git：它会去掉输出首尾空白、把 \r\n 换成 \n。"""
-    if git(cwd, "cat-file", "-e", f"{ref}:{path}") is None:
+    """ref 里这个文件的各行（原文：不去首尾空白，\r 留在行里）。三种情况分开：
+    文件不存在返回 None；空文件返回 []；查不了或读不出来抛 ReadError（超时、异常、git 返回非零都算）。
+    不用 common.git 读内容：它会去掉输出首尾空白、把 \r\n 换成 \n。"""
+    # 用 ls-tree 查在不在：成功且没输出才是「不存在」，查询本身失败不能当成不存在。--literal-pathspecs：文件名里的 [] * 按字面算
+    listed = git(cwd, "--literal-pathspecs", "ls-tree", "-z", ref, "--", path)
+    if listed is None:
+        raise ReadError(f"{ref[:12]}:{path}（查文件在不在失败）")
+    if not listed.startswith(("100", "120")):  # 普通文件、符号链接才有内容可比；没有输出就是不存在
         return None
     try:
         r = subprocess.run(["git", "show", f"{ref}:{path}"], cwd=cwd, capture_output=True, timeout=15)
-    except Exception:  # noqa: BLE001
-        return []
+    except Exception as e:  # noqa: BLE001
+        raise ReadError(f"{ref[:12]}:{path}（git show 出错：{type(e).__name__}）")
     if r.returncode != 0:
-        return []
+        raise ReadError(f"{ref[:12]}:{path}（git show 退出码 {r.returncode}）")
     lines = r.stdout.decode("utf-8", "replace").split("\n")
     return lines[:-1] if lines[-1] == "" else lines  # 文件末尾的换行不算多一个空行
 
@@ -126,7 +145,11 @@ def main(argv=None):
         if not fork:
             print(f"验收：出错\n找不到 {base} 和 {a.branch} 的分叉点")
             return 2
-        bad = touched_tests(cwd, fork, a.branch, files)
+        try:
+            bad = touched_tests(cwd, fork, a.branch, files)
+        except ReadError as e:
+            print(f"验收：出错\n读不出已有测试文件，没法对比：{e}")
+            return 2
         if bad:
             shown = bad[:10]
             more = f"\n……另有 {len(bad) - len(shown)} 条" if len(bad) > len(shown) else ""

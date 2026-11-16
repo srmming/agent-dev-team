@@ -65,20 +65,22 @@ def github_status(cwd, repo, sha):
 
 def github_report(cwd, repo, sha):
     """查一次，返回 {state, lines, test, deploy}。state 是 ok / fail / running / none。
-    test 是 通过 / 不通过 / 没有 / 还在跑，deploy 是 成功 / 失败 / 没有记录 / 还在跑 / 未确认。
+    test 是 通过 / 不通过 / 没有 / 还在跑 / 未确认（任一项测试查询失败或没查全），deploy 是 成功 / 失败 / 没有记录 / 还在跑 / 未确认。
     只有测试（检查结果、提交状态）成功、没有部署记录时 state 是 none：测试通过不等于部署成功。
     同一来源的同名检查、同一环境的部署可能有好几次（重跑、重新部署），每个只看最新一次。
     检查结果（check runs）和提交状态（commit statuses）是两套东西，有的 CI 只报其中一套，两套都查。
     任何一项查询失败都不报通过：确定有失败报 fail，否则报 none（无法判断）。"""
     bad, running, unknown = [], [], []
-    t_bad, t_run, t_seen = [], [], 0
+    t_bad, t_run, t_seen, t_unsure = [], [], 0, False
     d_bad, d_run, d_seen, d_unsure = [], [], 0, False
     runs = gh_api(cwd, f"repos/{repo}/commits/{sha}/check-runs?per_page=100")
     if not isinstance(runs, dict) or not isinstance(runs.get("check_runs"), list):
         unknown.append("查不到检查结果（gh 查询失败）")
+        t_unsure = True
         runs = {"check_runs": []}
     elif isinstance(runs.get("total_count"), int) and runs["total_count"] > len(runs["check_runs"]):
         unknown.append(f"检查有 {runs['total_count']} 个，只查到 {len(runs['check_runs'])} 个")
+        t_unsure = True
     for c in _latest(runs["check_runs"], _check_key, "started_at"):
         t_seen += 1
         name = c.get("name", "?")
@@ -90,10 +92,12 @@ def github_report(cwd, repo, sha):
     st = gh_api(cwd, f"repos/{repo}/commits/{sha}/status?per_page=100")
     if not isinstance(st, dict) or not isinstance(st.get("statuses"), list):
         unknown.append("查不到提交状态（gh 查询失败）")
+        t_unsure = True
     else:
         items = [x for x in st["statuses"] if isinstance(x, dict)]
         if isinstance(st.get("total_count"), int) and st["total_count"] > len(items):
             unknown.append(f"提交状态有 {st['total_count']} 个，只查到 {len(items)} 个")
+            t_unsure = True
         for x in items:
             t_seen += 1
             if x.get("state") in STATUS_BAD:
@@ -127,7 +131,8 @@ def github_report(cwd, repo, sha):
         elif state not in DEPLOY_OK:
             d_run.append(f"部署 {env} 状态 {state}")
     bad, running = t_bad + d_bad, t_run + d_run
-    test = "不通过" if t_bad else "还在跑" if t_run else "通过" if t_seen else "没有"
+    # 确定失败优先；任何一项查询失败或没查全就是未确认（不能让查到的那一半替没查到的写「通过」）
+    test = ("不通过" if t_bad else "未确认" if t_unsure else "还在跑" if t_run else "通过" if t_seen else "没有")
     deploy = ("失败" if d_bad else "未确认" if d_unsure else "还在跑" if d_run else
               "成功" if d_seen else "没有记录")
 
