@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """对照真 shell：把一批写法交给真的 bash / zsh 跑（PATH 里放一个假的 git，只记下自己有没有被叫去 push / merge），
 只要有一个 shell 真的执行了上传，守卫就必须认得出。防的是「守卫的拆法和真 shell 对不上」这一类漏洞。
-全部在临时目录里跑，PATH 只有假 git 和系统自带的基本命令，不联网，不碰真实仓库。
+全部在临时目录里跑，PATH 只有假 git 和系统自带的基本命令，不联网，不碰真实仓库
+（GIT_DIR 还指到一个不存在的目录：万一哪条写法绕开 PATH 找到了真的 git，它也什么都做不了）。
 运行：python3 -m unittest discover -s tests -v
 """
 import os
@@ -56,7 +57,6 @@ TRICKS = [
     "repeat 1 git push",
     "noglob git push",
     "command git push",
-    "command -p git push",
     "builtin command git push",
     "exec git push",
     "env git push",
@@ -104,7 +104,6 @@ TRICKS = [
     "bash -c 'git push'",
     "sh -c 'git push'",
     "sh -c \"sh -c 'git push'\"",
-    "sh -lc 'git push'",
     "sh -c 'git \"$@\"' _ push",
     "eval 'git push'",
     "eval git\\ push",
@@ -187,7 +186,8 @@ class ShellDiff(unittest.TestCase):
         """在真 shell 里跑一遍，返回假 git 有没有被叫去上传。"""
         if os.path.exists(self.mark):
             os.remove(self.mark)
-        env = {"PATH": self.bin + ":/usr/bin:/bin", "HOME": self.work, "MARK": self.mark}
+        env = {"PATH": self.bin + ":/usr/bin:/bin", "HOME": self.work, "MARK": self.mark,
+               "GIT_DIR": os.path.join(self.tmp, "no-such-repo")}
         try:
             subprocess.run([shell, *flags, "-c", script], cwd=self.work, env=env, stdin=subprocess.DEVNULL,
                            capture_output=True, timeout=20)

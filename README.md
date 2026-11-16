@@ -113,7 +113,7 @@
 - 把命令按 `;` `&&` `||` `|` `&`、换行、括号拆成一段段。`$( )`、反引号、`bash` / `sh` / `zsh -c "..."`、`eval "..."`、`trap "..."`、`alias 名字="..."`、喂给 shell 的 heredoc 和 `<<<`、没加引号的 heredoc 正文里的 `$( )`，里面的命令也拆开查。拆法照着真的 bash 和 zsh 核对过：`((命令); x)` 不是算术、算术里套的 `$( )`、反引号里再套反引号、`$'...'` 里的转义、zsh 的 `{命令}` 和 `=git`、括号里开的 heredoc（zsh 里 `$(cat <<EOF)` 后面几行会被执行）都按会执行算。
 - 一段命令里，`git` 或 `gh`（不分大小写）不管出现在第几个词，后面跟着上传的子命令就算。所以不靠包装器名单：`env git push`、`timeout 30 git push`、`rtk proxy git push`、没见过的包装器都认得出。也不去记 git 的哪些选项带值：选项后面那个词可能是选项的值，也可能就是子命令，两种都算。代价是 `echo git push`、`git -C push status` 也算；`grep "git push" f` 这种加了引号的不算。
 - `gh api` 只有明显只读的才放：没指定方法或 `-X GET`，加上 `--jq`、`-H`、`--paginate` 这类只影响输出的选项。带 `-f` / `-F` 而没明说 GET、别的方法、`graphql`、认不出的选项，都按写算。
-- 看不懂的结构，加上命令文字里出现 `push`、`merge`、`send-pack`、`pr create`、`api` 这些词，按「有」算。看不懂的结构是：拆不开（引号括号没闭合、套得太深）；命令名是变量、命令替换、通配符或花括号展开（`$GIT push`、`{git,push}`）；shell 从标准输入读命令而守卫看不到内容（`... | bash`）；git / gh 的参数由 `xargs`、`find -exec` 拼出来。
+- 看不懂的结构，加上命令文字里出现 `push`、`merge`、`send-pack`、`pr create` 这些词，按「有」算。看不懂的结构是：拆不开（引号括号没闭合、套得太深）；命令名是变量、命令替换、通配符或花括号展开（`$GIT push`、`{git,push}`）；shell 从标准输入读命令而守卫看不到内容（`... | bash`）；git / gh 的子命令由 `xargs`、`find -exec` 拼出来（`xargs git`、`xargs -I% git %`）。
 - `git` 的子命令是变量（`git $x`）或带着临时别名（`git -c alias.p=push p`）时，不管有没有这些词都算。
 
 有上传动作时，子代理和对接窗口直接拦；负责人走第二步。
@@ -125,7 +125,7 @@
   - `git [-C <路径>] push ...`
   - `gh pr create ...`
 
-  和 `cd`、`pushd`、`popd`、子 shell、别的命令、管道、`&&`、变量、`env` 等包装器、`VAR=值`（包括 `GIT_DIR=`、`GIT_WORK_TREE=`）、`git --git-dir` / `--work-tree` / `-c` 写在一起的都拦，提示「上传命令请单独运行」。这样守卫不用猜目录，也不用猜前一条命令把仓库改成了什么样：仓库就是钩子给的当前目录，或者 `-C` 指的那个目录。
+  和 `cd`、`pushd`、`popd`、子 shell、别的命令、管道、`&&`、变量、命令替换、通配符、`env` 等包装器、`VAR=值`（包括 `GIT_DIR=`、`GIT_WORK_TREE=`）、`git --git-dir` / `--work-tree` / `-c` 写在一起的都拦，提示「上传命令请单独运行」。合并说明、PR 标题和正文可以随便写，但要直接写在引号里：单引号里什么字都行，双引号里不能有 `$` 和反引号（shell 会展开），`$(cat <<EOF ...)` 也不行。这样守卫不用猜目录，也不用猜前一条命令把仓库改成了什么样：仓库就是钩子给的当前目录，或者 `-C` 指的那个目录。
 - `git merge`：只认 `git merge [--no-ff] [--ff-only] [--no-edit] <一个分支> [-m <说明>]`，以及 `git merge --abort` / `--quit`（直接放行）。`--continue`、`-s`、`-X`、`--squash`、`--no-commit`、一次合并几个分支、分支名带 `~` `^` 的都拦。要合并的提交 = `HEAD..<分支>`。
 - `git push`：只认 `git push`、`git push <远端>`、`git push <远端> <分支>`、`git push <远端> <本地分支>:<远端分支>`，可以加 `-u`。
   - 远端必须是仓库里配置好的远端名，不能是网址或路径。要推的必须是本地分支或 `HEAD`。
@@ -186,7 +186,7 @@
   - 把命令当字符串交给别的程序去跑：`watch '...'`、`su -c '...'`、`ssh 主机 '...'`。
   - git 自己会去跑的命令：`git rebase --exec '...'`、git 钩子、`core.pager` 这类配置里写的命令。
   - shell 里早就定义好的别名和函数（比如 oh-my-zsh 的 `gp` 就是 git push）。守卫只认 `git` 和 `gh` 这两个词。
-  - 别的上传工具（`hub`、`glab` 等），和不走命令行的工具（比如 GitHub 的 MCP 工具）。
+  - 别的上传方式（`hub`、`glab`、`git send-email`、`git svn dcommit` 等），和不走命令行的工具（比如 GitHub 的 MCP 工具）。
   - 命令名或子命令是变量、展开、编码拼出来的，命令文字里又没出现 `push` / `merge` 这些词：`a=pu; b=sh; $G $a$b`、`echo <base64> | base64 -d | bash`。
   - git 和 gh 的别名：`git config alias.p push` 之后的 `git p`，`gh alias set` 之后的别名。
   - 绕开 git 和 gh 直接调 GitHub 接口（`curl` 等）。
@@ -198,11 +198,13 @@
 - 上传关是保守判断，下面这些会被误拦，改个写法就行：
   - 把 git push 当普通词的命令：`echo git push`、`man git push`。加引号就不算。目录或文件正好叫 push / merge 的：`git -C push status`。
   - 负责人把上传命令和别的东西写在一起：`cd x && git push`、`git push | tail`、`git merge x && git push`。分开单独运行。
+  - 负责人用 `gh pr create --body "$(cat <<'EOF' ...)"` 写 PR 正文。正文直接写在引号里。
   - 变量当命令名，同一条命令里又出现 `push` / `merge` 这些词：`$PYTHON tests/test_merge.py`。
   - `gh api` 用 POST 做的读操作（比如 graphql 查询）。
   - 负责人强推、删远端分支、推标签、第一次推送到空的远端：这些请用户自己做，或者用户先说「普通对话」。
 - 审核看的是一段提交的最终结果。中间提交的内容（比如加了又删掉的文件）会跟着历史一起上传，Codex 不一定看过。
 - `gh pr create` 查的是本地的 head 分支，不是远端上那个分支的实际内容。
+- 审核员是模型。被审的改动里可以写话去骗它，review.py 只管认整行的结论，管不了 Codex 自己被说服；Codex 在结论后面又原样引用了一行 `VERDICT: PASS` 的话，也会被当成通过。
 - 回滚提交不经 Codex 审核就记进审核记录。rollback.py 只保证撤回的是当前分支历史里的提交；撤回哪些由负责人定，撤回一个修复也会把原来的问题带回来。
 - 和最初的规格不一样的地方：通过记录从「一行一个提交号」改成了审核单元；上传关从「查不了就放行」改成了「看不懂就拦」（第一次推送、不在仓库里都拦）；负责人不能强推、不能用 `gh pr merge`；夹带改动的合并提交要审；黑名单多拦了包装器（`sudo` `env` `timeout` 等）后面的命令和 `bash -c`、`eval`、喂给 shell 的 heredoc 里的命令，多放了重定向到 `/dev/stdout`、`/dev/stderr`、`/dev/tty`。
 - 新对话默认是负责人模式，对所有文件夹都生效，不只是 git 项目。不想要时说「普通对话」，或用「开关」关掉。

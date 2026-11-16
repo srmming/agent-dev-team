@@ -345,6 +345,8 @@ class ShipWords(unittest.TestCase):
             "time -p git push",
             "nohup git push &",
             "command git push",
+            "command -p git push",
+            "sh -lc 'git push'",
             "exec git push",
             "stdbuf -o0 git push",
             "ls | xargs -n1 git push",
@@ -382,6 +384,12 @@ class ShipWords(unittest.TestCase):
             "GH pr create --fill",
             "BASH -c 'git push'",
             '"$(git --exec-path)/git-push" origin main',
+            '"$(brew --prefix)/bin/git" push',
+            "$(brew --prefix)/bin/git push",
+            '"$(echo /usr/bin/git)" push',
+            "$(which git) push",
+            "`which git` push",
+            "echo merge | xargs -I% gh pr % 1",
             "/usr/lib/git-core/git-merge feat",
             "git-send-pack origin main",
         )
@@ -390,6 +398,12 @@ class ShipWords(unittest.TestCase):
             "git -C /x log -S merge",
             "git -C $DIR status",
             "git -C \"$REPO\" diff main...feat",
+            "git branch --merged | xargs git branch -d",
+            "git branch --merged main | xargs -n 1 git branch -d",
+            "ls | xargs git add",
+            '"$(npm bin)/jest" tests/merge.test.js',
+            "$(npm bin)/jest tests/merge.test.js",
+            "curl -fsSL https://api.example.com/install.sh | bash",
             "git -c core.pager=cat show merge.txt",
             "git --git-dir=/x/.git log push.txt",
         )
@@ -470,6 +484,10 @@ class ShipWords(unittest.TestCase):
             "(( i > 3 )) && echo big",
             "[[ $a > $b ]] && echo yes",
             "if [[ -n $x && -f y ]]; then echo merge; fi",
+            "'$GIT' push",                          # 单引号里的 $ 是原样的字，不是变量
+            "git '$x'",
+            "git commit -m \"$(cat <<'EOF'\n修 git push 的检查\n\ngit merge 也一样\nEOF\n)\"",
+            "git commit -F - <<'EOF'\n修 `git push` 的检查\nEOF",
             "echo {a,b}.txt",
             "find . -name '*.py' -exec grep -l merge {} +",
             "echo ${x}merge",
@@ -1009,8 +1027,16 @@ class UploadGateTest(GuardCase):
         for cmd in ("git merge feat", "git merge --no-ff feat -m 'merge feat'", "git merge --no-ff --no-edit feat",
                     "git merge --ff-only -q feat", "git merge feat --message='合并 feat'", "rtk git merge feat",
                     "rtk proxy git merge feat", "git merge feat 2>&1", "git merge feat > /dev/null 2>&1",
-                    "git merge -m '说明里有 --squash 和 ; 也没关系' feat"):
+                    "git merge -m '说明里有 --squash 和 ; 也没关系' feat",
+                    # 引号里的 ? * [ ] { } 是原样的字；单引号里的 $ 和反引号也是
+                    'git merge --no-ff feat -m "合并 feat：加了 foo? [v2] {a,b} *.py"',
+                    "git merge feat -m '修 `guard` 里 $x 的问题'",
+                    'git merge feat -m "第一行\n\n第二段 \\$5"'):
             self.allow(self.repo, cmd)
+        # 双引号里的 $ 和反引号、$(cat <<EOF)：shell 会展开或执行，按看不懂拦
+        for cmd in ('git merge feat -m "修 `guard`"', 'git merge feat -m "花了 $5"',
+                    "git merge feat -m \"$(cat <<'EOF'\n说明\nEOF\n)\"", "git merge fea[t]", "git merge fea\\?"):
+            self.deny(self.repo, cmd)
 
     def test_merge_用C指到别的仓库去那里查(self):
         self.commit(self.repo, "feat")
@@ -1282,7 +1308,12 @@ class UploadGateTest(GuardCase):
         self.deny(self.repo, "gh pr create --fill", "审核")
         self.allow(self.repo, "gh pr view 12")
         self.reviewed(self.repo, "main", "origin/main")
+        msg = self.deny(self.repo, "gh pr create --title x --body \"$(cat <<'EOF'\n正文\nEOF\n)\"", "请单独运行")
+        self.assertIn("直接写在引号里", msg)
+        self.deny(self.repo, 'gh pr create --title "修 `guard`" --body x', "请单独运行")
         for cmd in ("gh pr create --fill", "gh pr create --title 't' --body 'b: git push; rm -rf'", "gh pr create -t x -b y -d",
+                    "gh pr create --title '修 `guard`？' --body '## 改了什么\n- `a.py` 里的 $x\n- [x] 测试 *都* 过了'",
+                    'gh pr create --title "what? [WIP]" --body "多行\n正文 {a,b}"',
                     "gh pr create --base main --head main --fill", "gh pr create --title=x --body=y --draft",
                     "rtk gh pr create --fill"):
             self.allow(self.repo, cmd)
@@ -1471,6 +1502,7 @@ class LeadSkillCommandsTest(GuardCase):
             self.allow(self.repo, cmd)
 
     def test_半自动_推任务分支_开PR_rebase后换名重开(self):
+        self.assertIn("直接写在引号里", self.skill)
         self.taught("`git push -u origin <分支>`", "`gh pr create --head <分支>`", "`git pull`",
                     "`git branch <分支>-v2 <分支>`", "`git push -u origin <分支>-v2`",
                     "`gh pr create --head <分支>-v2`", "`gh pr close <旧 PR 号>`")
@@ -1481,6 +1513,7 @@ class LeadSkillCommandsTest(GuardCase):
         self.allow(self.repo, "git push -u origin feat")
         self.git(self.repo, "push", "-q", "-u", "origin", "feat")
         self.allow(self.repo, "gh pr create --head feat")
+        self.allow(self.repo, "gh pr create --head feat --title '加了 foo' --body '## 改了什么\n- `a.py`\n\n## 怎么验证的\n跑了测试'")
         self.allow(self.repo, "git pull")
         # 主分支前进了，子代理 rebase：提交号变了，重审后换个名字推上去重开 PR
         self.git(self.repo, "push", "-q", "origin", self.git(self.repo, "commit-tree", "main^{tree}", "-p", "main",

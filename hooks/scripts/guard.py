@@ -197,42 +197,52 @@ def _brace_word(s, i):
     return False
 
 
+class Word(str):
+    """拆出来的一个词。dyn = shell 还会再展开它（变量、命令替换、通配符、花括号展开），守卫看到的不是最后的样子。
+    单引号里、反斜杠后面的 $ * ? 是原样的字，不算；双引号里只有 $ 和反引号算。"""
+    dyn = False
+
+
 def tokenize(cmd):
     """把命令拆成 (类型, 文本) 列表：w = 词，o = 引号外的操作符，s = 套在里面、要另外检查的命令，
     h = heredoc 的正文。引号里的 | ; > 等只算词的一部分，不算操作符。注释直接跳过。
     引号、括号没闭合时抛 ValueError。"""
-    toks, buf, has, quoted, i, n = [], [], False, False, 0, len(cmd)
+    toks, buf, mask, has, quoted, i, n = [], [], [], False, False, 0, len(cmd)
     heredocs, want = [], None  # 等着读正文的 heredoc；刚看到 << 还没读到结束符
     parens = braces = 0  # 现在在几层括号里；当前这个词里还没配上对的 { 有几个
 
+    def put(text, live="q"):
+        """往当前这个词里加一段。live：这一段里 shell 还会展开的字（没有就是 q）。"""
+        nonlocal has
+        buf.append(text)
+        mask.append(live)
+        has = True
+
     def flush():
-        nonlocal buf, has, quoted, want, braces
+        nonlocal buf, mask, has, quoted, want, braces
         if has:
-            word = "".join(buf)
+            word = Word("".join(buf))
+            word.dyn = bool(DYN_RE.search("".join(mask)))
             toks.append(("w", word))
             if want is not None:
                 heredocs.append((word, quoted) + want)
                 want = None
-        buf, has, quoted, braces = [], False, False, 0
+        buf, mask, has, quoted, braces = [], [], False, False, 0
 
     while i < n:
         c = cmd[i]
-        arith = None
-        if cmd.startswith("$((", i):
-            arith = _arith_end(cmd, i + 1)
-        elif cmd.startswith("((", i) and not has:
-            arith = _arith_end(cmd, i)
+        arith = _arith_end(cmd, i) if cmd.startswith("((", i) and not has else None
         if c == "\\" and i + 1 < n:
             if cmd[i + 1] != "\n":  # 反斜杠加换行是续行，直接跳过
-                buf.append(cmd[i + 1])
-                has = quoted = True
+                put(cmd[i + 1])
+                quoted = True
             i += 2
         elif c == "'":
             j = cmd.find("'", i + 1)
             if j < 0:
                 raise ValueError("单引号没有闭合")
-            buf.append(cmd[i + 1:j])
-            has = quoted = True
+            put(cmd[i + 1:j])
+            quoted = True
             i = j + 1
         elif c == "$" and cmd.startswith("$'", i):  # $'...' 里可以有 \'
             j = i + 2
@@ -240,27 +250,27 @@ def tokenize(cmd):
                 j += 2 if cmd[j] == "\\" else 1
             if j >= n:
                 raise ValueError("单引号没有闭合")
-            buf.append(_ansi_c(cmd[i + 2:j]))
-            has = quoted = True
+            put(_ansi_c(cmd[i + 2:j]))
+            quoted = True
             i = j + 1
         elif c == '"':
             j = i + 1
             while j < n and cmd[j] != '"':
                 if cmd[j] == "\\" and j + 1 < n:
-                    buf.append(cmd[j + 1])
+                    put(cmd[j + 1])
                     j += 2
                 elif cmd[j] == "`":
                     k = _close_backtick(cmd, j)
                     toks.append(("s", _backtick_text(cmd, j, k)))
-                    buf.append(cmd[j:k + 1])
+                    put(cmd[j:k + 1], "$")
                     j = k + 1
                 elif cmd.startswith("$(", j):
                     k = _match_paren(cmd, j + 1)
                     toks += [("s", t) for t in _paren_scripts(cmd, j + 1, k)]
-                    buf.append(cmd[j:k + 1])
+                    put(cmd[j:k + 1], "$")
                     j = k + 1
                 else:
-                    buf.append(cmd[j])
+                    put(cmd[j], "$" if cmd[j] == "$" else "q")  # 双引号里只有 $ 还会展开
                     j += 1
             if j >= n:
                 raise ValueError("双引号没有闭合")
@@ -269,15 +279,18 @@ def tokenize(cmd):
         elif c == "`":
             k = _close_backtick(cmd, i)
             toks.append(("s", _backtick_text(cmd, i, k)))
-            buf.append(cmd[i:k + 1])
-            has = True
+            put(cmd[i:k + 1], "$")
+            i = k + 1
+        elif cmd.startswith("$(", i):
+            # 命令替换或算术 $(( ))：整段算进当前这个词（"$(brew --prefix)/bin/x" 是一个词），里面的命令另外查
+            k = _match_paren(cmd, i + 1)
+            toks += [("s", t) for t in _paren_scripts(cmd, i + 1, k)]
+            put(cmd[i:k + 1], "$")
             i = k + 1
         elif arith is not None:
-            # 算术：里面的 > < 不是重定向，整段当成一个词；里面套着的 $( ) 照样要查
-            start = i + (3 if c == "$" else 2)
-            toks += [("s", t) for t in _subs(cmd[start:arith - 1])]
-            buf.append(cmd[i:arith + 1])
-            has = True
+            # 算术 (( ))：里面的 > < 不是重定向，整段当成一个词；里面套着的 $( ) 照样要查
+            toks += [("s", t) for t in _subs(cmd[i + 2:arith - 1])]
+            put(cmd[i:arith + 1], "$")
             i = arith + 1
         elif c == "#" and not has:  # 注释，跳到行尾
             j = cmd.find("\n", i)
@@ -315,7 +328,7 @@ def tokenize(cmd):
         elif c in ";|&<>":
             op = next(o for o in OPERATORS if cmd.startswith(o, i))
             if op[0] in "<>" and has and not quoted and "".join(buf).isdigit():
-                buf, has = [], False  # 2>&1 里的 2 是文件描述符，不是词
+                buf, mask, has = [], [], False  # 2>&1 里的 2 是文件描述符，不是词
             flush()
             toks.append(("o", op))
             i += len(op)
@@ -330,8 +343,7 @@ def tokenize(cmd):
             i += 1
         else:
             braces += (c == "{") - (c == "}" and braces > 0)
-            buf.append(c)
-            has = True
+            put(c, c)  # 引号外的字：$ * ? [ ] { } 都可能被展开
             i += 1
     flush()
     return toks
@@ -442,7 +454,14 @@ def unwrap(words):
 
 def cmd_name(word):
     """一个词当命令名时指的是哪个程序：去掉路径，转小写（macOS 的文件名不分大小写，GIT 也是 git），
-    去掉 zsh 的 = 前缀（=git 是 git 的完整路径）。"""
+    去掉 zsh 的 = 前缀（=git 是 git 的完整路径）。
+    路径是命令替换拼出来的："$(brew --prefix)/bin/git" 看替换后面那段，是 git；
+    "$(echo /usr/bin/git)" 整个都是替换出来的，原样返回（调用的地方会当成看不懂的命令名）。"""
+    if "$(" in word or "`" in word:
+        tail = re.split(r"[)`]", word)[-1]
+        if "/" not in tail:
+            return word
+        word = tail
     return os.path.basename(word).lower().lstrip("=")
 
 
@@ -591,7 +610,8 @@ def check_lead_bash(cmd):
 # ---------- 上传动作：第一步，只判断「有没有可能上传」 ----------
 
 # 命令拆不开、或有看不懂的结构时，命令文字里出现这些词就按「有上传动作」算
-SHIP_HINT = re.compile(r"push|merge|send-pack|\bpr\s+create|\bapi\b")
+SHIP_HINT = re.compile(r"push|merge|send-pack|\bpr\s+create")
+PLAIN_RE = re.compile(r"^[a-z][a-z-]*$")  # 写明了的子命令长这样
 # 展开之后才知道是什么的词：变量、命令替换、通配符、花括号展开（bash 里 {git,push} 就是 git push）、find / xargs 的 {}
 DYN_RE = re.compile(r"[$`*?]|\[[^\]]+\]|\{[^{}]*(,|\.\.)[^{}]*\}|\{\}")
 # git 自己的选项里确定不带值的。别的选项都当成「后面那个词可能是它的值」（见 git_ship）
@@ -607,7 +627,8 @@ GH_API_FIELDS = {"-f", "--raw-field", "-F", "--field"}
 
 
 def _dyn(word):
-    return bool(DYN_RE.search(word))
+    """这个词 shell 还会再展开吗。拆命令时拆出来的词自己记着（见 Word）；别处拼出来的字符串按字面猜。"""
+    return word.dyn if isinstance(word, Word) else bool(DYN_RE.search(word))
 
 
 def git_ship(words):
@@ -686,13 +707,13 @@ def scan_ship(cmd):
         kinds = set()
         for raw in segs:
             bare = unwrap(raw)
-            if bare and _dyn(cmd_name(bare[0])):
+            if bare and _dyn(bare[0]) and _dyn(cmd_name(bare[0])):
                 unknown = True  # 命令名要展开之后才知道，看不出跑的是什么
             for words in (raw, bare):  # bare：剥掉包装器再看一遍（env -S "git push" 这类）
                 fed = bool(ARG_FEEDERS & set(words))
                 for i, w in enumerate(words):
                     base = cmd_name(w)
-                    guess = _dyn(base) and not ASSIGN_RE.match(w)
+                    guess = _dyn(w) and _dyn(base) and not ASSIGN_RE.match(w)  # 命令名那一段是展开出来的
                     if base.startswith("git-") and base[4:] in GIT_SHIP_SUBS:
                         kinds.add(GIT_SHIP_SUBS[base[4:]])  # <git 的程序目录>/git-push
                     if guess:  # 把这个词当成 git / gh 试一次；只认紧跟着的子命令，不然随便一个变量后面有 merge 都算
@@ -702,10 +723,13 @@ def scan_ship(cmd):
                         if base != name:
                             continue
                         kind = ship(words[i:])
-                        if kind == "" and i > 0 or fed:
-                            unknown = True  # xargs git、find -exec git {}：子命令从别处来
                         if kind:
                             kinds.add(kind)
+                        # xargs git、xargs -I% git %：子命令是别的程序拼出来的。
+                        # git branch --merged | xargs git branch -d 这种子命令写明了的不算
+                        subs = [git_parts(words[i:])[0]] if name == "git" else words[i + 1:i + 3]
+                        if kind == "" and i > 0 or fed and not all(PLAIN_RE.match(s) for s in subs):
+                            unknown = True
         return kinds, unknown
     except Exception:
         return set(), True
@@ -735,7 +759,9 @@ UNKNOWN = ("守卫看不懂这条命令（命令名是变量或展开、命令�
            "要上传就单独运行最简单的写法，比如 `git push origin <分支>`。")
 STANDALONE = ("上传命令（合并 / 推送 / 开 PR）请单独运行，不要和 cd、别的命令、管道、变量、包装器写在一起。"
               "守卫只认这几种写法：`git merge <分支>`、`git push`、`git push <远端> <分支>`、"
-              "`gh pr create --head <分支>`；要指定仓库就在 git 后面加 `-C <路径>`。")
+              "`gh pr create --head <分支>`；要指定仓库就在 git 后面加 `-C <路径>`。"
+              "合并说明、PR 标题和正文直接写在引号里（可以换行；有 $ 或反引号就用单引号），"
+              "不要用 $(cat <<EOF ...) 和变量。")
 MERGE_HELP = "守卫只认 `git merge [--no-ff] [--no-edit] <分支> [-m <说明>]` 和 `git merge --abort`。"
 PUSH_HELP = ("守卫只认这几种写法：`git push`、`git push <远端>`、`git push <远端> <分支>`、"
              "`git push <远端> <本地分支>:<远端分支>`，前面可以加 -u。")
@@ -1098,13 +1124,16 @@ NO_SHIP_HINT = ("\n（守卫是保守判断的：命令里只要可能有上传�
                 "变量当命令名、拆不开的命令里出现 push / merge。确实不是上传，就把命令写直白些再试。）")
 
 
-TIME_LIMIT = 20  # 秒。钩子自己的超时是 30 秒，超时会被当成放行，所以守卫要赶在它前面自己收尾
+# 秒。钩子自己的超时是 30 秒，超时会被当成放行，所以守卫要赶在它前面自己收尾。
+# 环境变量 AGENT_DEV_TEAM_GUARD_TIMEOUT 只能把它调小（测试用）。
+TIME_LIMIT = 20
+TIMEOUT_HINT = re.compile(SHIP_HINT.pattern + r"|\bgh\b")  # 超时的时候没法细看，gh 的命令也算
 WATCH = {}  # 正在检查的命令，超时的时候用
 
 
 def on_timeout(signum, frame):
     """守卫跑得太久：正在查的命令可能是上传命令就拦，其余放行。"""
-    if SHIP_HINT.search(WATCH.get("cmd", "")):
+    if TIMEOUT_HINT.search(WATCH.get("cmd", "")):
         print(PREFIX + "守卫检查这条命令超时了，而命令里出现了 push / merge 这类词，不能放行。"
               "把上传命令单独写成最简单的形式再试。", file=sys.stderr)
         os._exit(2)
