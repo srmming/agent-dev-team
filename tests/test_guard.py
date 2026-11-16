@@ -510,6 +510,10 @@ class ShipWords(unittest.TestCase):
             "cat <<EOF}\nx\nEOF}\ngit push\nEOF",   # 结束符是 EOF}
             "cat <<EOF\nx\ngit push",               # 一直没等到结束符
             "{git,pu''sh}",                         # 去掉引号才是 push
+            "EOF=1; echo $(( 1 << EOF\n)) ; git push\nEOF\n))",          # 算术里的 << 是移位，后面几行不是正文
+            "EOF=1; echo $(echo $((1<<EOF))\n) ; git push\nEOF\n)",
+            "echo ${x:-<<EOF}\ngit push\nEOF}\n}",
+            "echo \"${x:-'}\"; git push; echo \"'}\"",                  # zsh：双引号里 ${ } 中的单引号不是引号
         )
         self.not_ship(
             "cat <<'EOF'\n$(git push)\nEOF",      # 结束符加了引号：正文原样，不执行

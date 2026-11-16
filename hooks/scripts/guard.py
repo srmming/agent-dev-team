@@ -96,9 +96,11 @@ def _heredoc_body(s, i, delim, strip_tabs):
     return s[start:], n, False
 
 
-def _match_paren(s, i, pair="()"):
-    """s[i] 是左括号（pair 可以换成 {} 或 []），返回和它配对的右括号的位置。引号里的括号不算；
-    里面开的 heredoc 的正文也不算（git commit -m "$(cat <<'EOF' ... EOF)" 的正文里常有撇号和括号）。"""
+def _match_paren(s, i, pair="()", heredocs=False):
+    """s[i] 是左括号（pair 可以换成 {} 或 []），返回和它配对的右括号的位置。引号里的括号不算。
+    heredocs=True：里面开的 heredoc 的正文也不算（git commit -m "$(cat <<'EOF' ... EOF)" 的正文里常有撇号
+    和括号）。只能用在命令替换 $( ) 上：它里面的文字还会整段再当命令拆一遍，跳过的正文藏不住东西。
+    算术和 ${ } 里的 << 是移位或普通的字，不能跳。"""
     depth, n, docs = 0, len(s), []
     while i < n:
         c = s[i]
@@ -119,7 +121,7 @@ def _match_paren(s, i, pair="()"):
                 break
             i = j + 1
             continue
-        if c == "<" and s.startswith("<<", i) and not s.startswith("<<<", i):
+        if heredocs and c == "<" and s.startswith("<<", i) and not s.startswith("<<<", i):
             m = HEREDOC_RE.match(s, i)
             if m:
                 docs.append((re.sub(r"""\\(.)|['"]""", r"\1", m.group(2)), bool(m.group(1))))
@@ -169,6 +171,11 @@ def _arith_end(s, i):
     return outer if outer == inner + 1 else None
 
 
+def _comsub_end(s, i):
+    """s 从 i 开始是 "$("，返回配对的右括号的位置。$(( 开头的可能是算术，里面的 << 不当 heredoc。"""
+    return _match_paren(s, i + 1, heredocs=not s.startswith("((", i + 1))
+
+
 def _subs(text):
     """一段 shell 会展开的文字（算术、不带引号的 heredoc 正文）里套着的 $( ) 和反引号命令。"""
     out, i = [], 0
@@ -180,7 +187,7 @@ def _subs(text):
             out.append(_backtick_text(text, i, k))
             i = k + 1
         elif text.startswith("$(", i):
-            k = _match_paren(text, i + 1)
+            k = _comsub_end(text, i)
             out += _paren_scripts(text, i + 1, k)
             i = k + 1
         else:
@@ -302,12 +309,11 @@ def tokenize(cmd):
                     k = _close_backtick(cmd, j)
                     j = span(j, k, [_backtick_text(cmd, j, k)])
                 elif cmd.startswith("$(", j):
-                    k = _match_paren(cmd, j + 1)
+                    k = _comsub_end(cmd, j)
                     j = span(j, k, _paren_scripts(cmd, j + 1, k))
-                elif cmd.startswith("${", j):
-                    k = _match_paren(cmd, j + 1, "{}")
-                    j = span(j, k, _subs(cmd[j + 2:k]))
                 else:
+                    # 双引号里的 ${ } 不整段处理：bash 和 zsh 对里面的单引号看法不一样，
+                    # 一个字一个字走（遇到第一个 } 就算完）是两边都不会漏的走法
                     put(cmd[j], "$" if cmd[j] == "$" else "q")  # 双引号里只有 $ 还会展开
                     j += 1
             if j >= n:
@@ -319,7 +325,7 @@ def tokenize(cmd):
             i = span(i, k, [_backtick_text(cmd, i, k)])
         elif cmd.startswith("$(", i):
             # 命令替换或算术 $(( ))："$(brew --prefix)/bin/x" 是一个词
-            k = _match_paren(cmd, i + 1)
+            k = _comsub_end(cmd, i)
             i = span(i, k, _paren_scripts(cmd, i + 1, k))
         elif cmd.startswith("${", i) or cmd.startswith("$[", i):
             # 参数展开、旧式算术：里面的 # 不是注释，<< 不是 heredoc
