@@ -2,7 +2,7 @@
 name: shouwei
 description: "收尾汇报：更新 Notion 任务看板，并按用户全局 CLAUDE.md 里的 Slack 汇报规则发汇报。 负责人在一批任务全部合并后、或有任务挂起、上线回滚时使用；也可由\"汇报一下\"、\"通知 Dot\"、\"收尾\"触发。\n"
 metadata:
-  version: "0.2.0"
+  version: "0.2.1"
 ---
 
 # 收尾汇报
