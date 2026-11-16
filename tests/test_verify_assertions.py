@@ -163,6 +163,116 @@ class VerifyAssertions(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("已跳过断言检查", out)
 
+    # ---- Codex 第 1 轮审核：多行断言、常见跳过写法、注释误当断言 ----
+
+    def base(self, rel, text):
+        """把 main 上的已有测试换成 text，feat 重新从 main 拉出来。"""
+        sh(self.repo, "checkout", "-q", "main")
+        self.write(rel, text)
+        sh(self.repo, "add", "-A")
+        sh(self.repo, "commit", "-q", "--allow-empty", "-m", "base")
+        sh(self.repo, "checkout", "-q", "-B", "feat")
+
+    MULTI_PY = OLD_PY + """
+    def test_c(self):
+        self.assertEqual(
+            price(2),
+            100,
+        )
+"""
+    MULTI_JS = OLD_JS + """
+test('b', () => {
+  expect(total()).toEqual({
+    price: 100,
+  });
+});
+"""
+
+    def test_多行断言改了后续行的期望值(self):
+        self.base("tests/test_m.py", self.MULTI_PY)
+        self.change("tests/test_m.py", self.MULTI_PY.replace("100,", "200,"))
+        self.assert_fail("tests/test_m.py:12", "self.assertEqual(")
+
+    def test_多行expect改了对象里的期望值(self):
+        self.base("web/sum.test.js", self.MULTI_JS)
+        self.change("web/sum.test.js", self.MULTI_JS.replace("price: 100", "price: 200"))
+        self.assert_fail("web/sum.test.js:6")
+
+    def test_多行断言只改缩进和位置_不算(self):
+        self.base("tests/test_m.py", self.MULTI_PY)
+        stmt = "        self.assertEqual(\n            price(2),\n            100,\n        )\n"
+        moved = self.MULTI_PY.replace(stmt, "        pass\n").replace(
+            "        self.assertEqual(1 + 1, 2)\n",
+            "        self.assertEqual(1 + 1, 2)\n        if True:\n"
+            "            self.assertEqual(\n                price(2),\n                100,\n            )\n")
+        self.change("tests/test_m.py", moved)
+        self.assert_pass()
+
+    def test_常见跳过写法(self):
+        for text in (
+            OLD_PY.replace("import unittest\n", "import unittest\nfrom unittest import skip\n").replace(
+                "    def test_a", "    @skip('先跳过')\n    def test_a"),
+            OLD_PY.replace("    def test_a", "    @skipIf(True, '先跳过')\n    def test_a"),
+            OLD_PY.replace("    def test_a", "    @skipUnless(False, '先跳过')\n    def test_a"),
+            OLD_PY.replace("    def test_a", "    @expectedFailure\n    def test_a"),
+            OLD_PY.replace("    def test_a", "    @unittest.expectedFailure\n    def test_a"),
+            OLD_PY.replace("\n\nclass T", "\npytestmark = pytest.mark.skipif(True, reason='x')\n\nclass T"),
+            OLD_PY.replace("\n\nclass T", "\npytestmark = [\n    pytest.mark.skipif(True, reason='x'),\n]\n\nclass T"),
+            OLD_PY.replace("    def test_a(self):\n", "    def test_a(self):\n        raise unittest.SkipTest('x')\n"),
+        ):
+            with self.subTest(text=text):
+                sh(self.repo, "reset", "-q", "--hard", "main")
+                sh(self.repo, "clean", "-qfd")  # 上一轮没查出来时留下的 ran
+                self.change("tests/test_m.py", text)
+                self.assert_fail("新加了跳过标记")
+
+    def test_原来就有的跳过标记和无关的pytestmark_不算(self):
+        self.base("tests/test_m.py", OLD_PY.replace(
+            "import unittest\n", "import unittest\nfrom unittest import skip\n").replace(
+            "    def test_a", "    @skip('原来就跳过')\n    def test_a"))
+        text = OLD_PY.replace("import unittest\n", "import unittest\nfrom unittest import skip\n").replace(
+            "    def test_b", "    @skip('原来就跳过')\n    def test_b").replace(
+            "\n\nclass T", "\npytestmark = pytest.mark.django_db\n\nclass T")
+        self.change("tests/test_m.py", text)
+        self.assert_pass()
+
+    def test_改或删注释里的assert_不算(self):
+        old = OLD_PY.replace("        self.assertEqual(1 + 1, 2)\n",
+                             "        # assert price is calculated\n"
+                             "        self.assertEqual(1 + 1, 2)  # assert sum ok\n")
+        old = old.replace("    def test_b(self):\n", '    def test_b(self):\n        """assert 一下包含关系"""\n')
+        for new in (
+            old.replace("# assert price is calculated", "# 价格算对了"),
+            old.replace("        # assert price is calculated\n", ""),
+            old.replace("# assert sum ok", "# 求和没问题"),
+            old.replace('"""assert 一下包含关系"""', '"""查包含关系"""'),
+        ):
+            with self.subTest(new=new):
+                self.base("tests/test_m.py", old)
+                self.change("tests/test_m.py", new)
+                self.assert_pass()
+
+    def test_改或删JS注释里的expect_不算(self):
+        old = OLD_JS.replace("  expect(add(1, 1)).toBe(2);\n",
+                             "  // expect(add(2, 2)).toBe(4);\n"
+                             "  /*\n   * expect(add(3, 3)).toBe(6);\n   */\n"
+                             "  expect(add(1, 1)).toBe(2); // expect ok\n")
+        for new in (
+            old.replace("  // expect(add(2, 2)).toBe(4);\n", ""),
+            old.replace("  /*\n   * expect(add(3, 3)).toBe(6);\n   */\n", ""),
+            old.replace("// expect ok", "// 没问题"),
+        ):
+            with self.subTest(new=new):
+                self.base("web/sum.test.js", old)
+                self.change("web/sum.test.js", new)
+                self.assert_pass()
+
+    def test_字符串里的井号不当注释(self):
+        old = OLD_PY.replace('assert "x" in "xy"', 'assert "#" in "a#b"')
+        self.base("tests/test_m.py", old)
+        self.change("tests/test_m.py", old.replace('"a#b"', '"a#c"'))
+        self.assert_fail("tests/test_m.py:9", 'assert "#" in "a#b"')
+
 
 if __name__ == "__main__":
     unittest.main()
