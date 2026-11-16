@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""agent-dev-team 回滚：按给的顺序 git revert 提交，新回滚提交记进通过记录，可选接着推送。
+"""agent-dev-team 回滚：按给的顺序 git revert 提交，全部撤回成功后把这批回滚提交记成一个审核单元，可选接着推送。
 只撤回代码，不碰数据库。输出第一行是结论。退出码：完成 0，失败 1。
 """
 import argparse
@@ -40,24 +40,32 @@ def in_progress(cwd):
     return None
 
 
-def fail(msg, done):
+def fail(msg, done, recorded=False):
     print("回滚：失败")
     print(msg)
     if done:
-        print("已经做好的回滚提交（还在本地）：" + " ".join(s[:12] for s in done))
+        note = "已经记进审核记录" if recorded else "没有记进审核记录，推送前要先审核"
+        print(f"已经做好的回滚提交（还在本地，{note}）：" + " ".join(s[:12] for s in done))
     return 1
 
 
-def unreviewed_to_push(cwd):
-    """git push 会推上去、又没通过审核的提交（和守卫的上传关同一个算法）。关掉审核关或查不了时返回 []。"""
+def push_args(cwd):
+    """回滚后推送用的参数。和守卫的上传关同一套规则：守卫看不懂的、有没审核提交的，这里也不推。
+    返回 (不推的原因, None) 或 (None, 传给推送命令的参数)。审核关关掉时不查，照平常那样推。"""
     if os.environ.get("AGENT_DEV_TEAM_CODEX", "").lower() == "off":
-        return []
-    import guard  # 用守卫同一套算法；放这里导入，回滚的其他部分不依赖它
-    base = guard.upload_base(cwd, "HEAD")
-    if not base:
-        return []  # 纯本地仓库或第一次推送，和守卫一样查不了
-    missing = guard.unreviewed(cwd, f"{base}..HEAD", records.passed_commits(cwd))
-    return ["（git 查不出要推的提交）"] if missing is None else missing
+        return None, []
+    import guard  # 放这里导入，回滚的其他部分不依赖它
+    plan = guard.push_plan(cwd, [])
+    if isinstance(plan, str):
+        return plan, None
+    missing = guard.uncovered(cwd, f"{plan['base']}..{plan['tip']}")
+    if missing is None:
+        return "git 查不出要推哪些提交。", None
+    if missing:
+        return (f"要推的提交里有 {len(missing)} 个没通过审核（{' '.join(s[:12] for s in missing[:5])}）。"
+                "先处理这些提交再推。"), None
+    # 两边都写明：推什么、推到哪不受仓库配置影响
+    return None, [plan["remote"], f"{plan['tip']}:refs/heads/{plan['target']}"]
 
 
 def main(argv=None):
@@ -93,22 +101,20 @@ def main(argv=None):
         code, out = run_git(cwd, *args)
         if code != 0:
             run_git(cwd, "revert", "--abort")  # 开头查过没有别的操作在进行，这里中止的只会是自己这次
-            if done:
-                records.add_passed(cwd, done)
+            # 只撤回了一部分：停在一个没人审核过的中间状态，不记进审核记录
             return fail(f"撤回 {sha[:12]} 失败：\n{tail(out)}", done)
         done.append(git(cwd, "rev-parse", "HEAD"))
-    # 回滚提交回到的是已审核过的状态，记进通过记录，推送时不用再审
-    records.add_passed(cwd, done)
+    # 全部撤回后回到的是审核过的状态：这批回滚提交记成一个审核单元（要整批一起推），推送时不用再审
+    records.add_unit(cwd, done[-1], done)
 
     if a.push:
-        # 守卫看不到脚本里的 git push，这里自己查一遍：要推的提交里有没审核的就不推
-        missing = unreviewed_to_push(cwd)
-        if missing:
-            return fail(f"不推送：要推的提交里有 {len(missing)} 个没通过审核（{' '.join(s[:12] for s in missing[:5])}）。"
-                        "回滚提交已经在本地，先处理这些提交再推。", done)
-        code, out = run_git(cwd, "push")
+        # 守卫看不到脚本里的 git push，这里用守卫同一套规则自己查一遍
+        reason, args = push_args(cwd)
+        if reason:
+            return fail("不推送：" + reason, done, recorded=True)
+        code, out = run_git(cwd, "push", *args)
         if code != 0:
-            return fail(f"git push 失败：\n{tail(out)}", done)
+            return fail(f"git push 失败：\n{tail(out)}", done, recorded=True)
 
     print("回滚：完成" + ("（已推送）" if a.push else ""))
     print("回滚提交：" + " ".join(s[:12] for s in done))

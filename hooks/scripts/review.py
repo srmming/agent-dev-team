@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""agent-dev-team 审核：调 Codex 审一个分支的改动，通过就把提交记进通过记录。
+"""agent-dev-team 审核：调 Codex 审一个分支的改动，通过就记一个审核单元（见 records.py）。
+审核的是从基准到分支顶端这一整段的最终结果，所以通过只证明「整段一起上」没问题。
 输出第一行是结论。退出码：通过或没有改动 0，不通过 1，
 出错（不是仓库、找不到分支、找不到审核命令、超时）2，出错不计入失败轮数。
 """
@@ -81,17 +82,20 @@ def main(argv=None):
     base_sha, branch_sha = shas
 
     commits = git(cwd, "rev-list", f"{base_sha}..{branch_sha}")
-    diff = git(cwd, "diff", "--stat", f"{base_sha}...{branch_sha}")
-    if commits is None or diff is None:
+    # 有没有改动直接比两棵文件树（分叉点的和分支顶端的），不看 git diff 的输出：diff 的输出会被仓库配置影响
+    fork = git(cwd, "merge-base", base_sha, branch_sha)
+    trees = [git(cwd, "rev-parse", "--verify", "--quiet", f"{c}^{{tree}}") for c in (fork, branch_sha)] if fork else []
+    if commits is None or not fork or not all(trees):
         print(f"审核：出错（不计入失败轮数）\ngit 查不出 {base}...{a.branch} 的改动")
         return 2
     commits = commits.split()
-    if not diff:
+    if trees[0] == trees[1]:
         if commits:
-            # 有提交但合起来没改任何文件（空提交、改了又撤销）：没什么可审，记为通过，免得守卫一直拦
-            records.add_passed(cwd, commits)
+            # 有提交但合起来没改任何文件（空提交、改了又撤销）：没什么可审，记成一个审核单元，免得守卫一直拦。
+            # 单元只证明整段一起上没问题：只上传其中一部分（只推「改了」不推「撤销」）守卫照样拦。
+            records.add_unit(cwd, branch_sha, commits, base_sha)
             records.clear_fails(cwd, a.branch)
-            print(f"审核：没有改动\n{len(commits)} 个提交合起来没有改任何文件，已记为通过。")
+            print(f"审核：没有改动\n{len(commits)} 个提交合起来没有改任何文件，已记为通过（要整段一起上传）。")
         else:
             print("审核：没有改动")
         return 0
@@ -127,7 +131,7 @@ def main(argv=None):
     out = r.stdout or ""
     verdicts = verdicts_in(out)  # 取最后一个整行结论
     if verdicts and verdicts[-1] == "PASS":
-        records.add_passed(cwd, commits)  # 开跑前固定的那批提交
+        records.add_unit(cwd, branch_sha, commits, base_sha)  # 开跑前固定的那一段
         records.clear_fails(cwd, a.branch)
         print("审核：通过")
         return 0

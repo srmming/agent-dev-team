@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""端到端：负责人对话里，守卫的上传关和 review.py 的审核记录连起来走一遍。
+"""端到端：负责人对话里，守卫的上传关和 review.py 的审核记录（审核单元，reviewed.jsonl）连起来走一遍。
 临时 git 仓库 + 临时远端；AGENT_DEV_TEAM_HOME 和 HOME 都指到临时目录；审核命令是假的，不调真实的 Codex。
 守卫用真实的钩子输入格式从 stdin 喂。
 运行：python3 -m unittest discover -s tests -v
@@ -114,6 +114,18 @@ class LeadFlow(unittest.TestCase):
     def assert_allowed(self, command):
         self.assertEqual(self.guard(command), (0, ""), command)
 
+    def units(self):
+        return [(u["tip"], u["commits"]) for u in records.units(self.repo)]
+
+    def review_and_merge(self, branch, *merge_opts):
+        """负责人的正常流程：审核任务分支（假 Codex 说通过）→ 守卫放行 → 真的合并进主分支。"""
+        merge = " ".join(["git", "merge", *merge_opts, branch])
+        args = self.review_line(self.assert_blocked(merge))
+        code, out = self.run_review(args, "VERDICT: PASS\n")
+        self.assertEqual((code, out.splitlines()[0]), (0, "审核：通过"), out)
+        self.assert_allowed(merge)
+        self.git(self.repo, "merge", "-q", "--no-edit", *merge_opts, branch)
+
     def review_line(self, err):
         """拦截提示里给出的审核命令（完整绝对路径）。"""
         lines = [ln for ln in err.splitlines() if ln.startswith("python3 ")]
@@ -151,6 +163,8 @@ class LeadFlow(unittest.TestCase):
         feat_sha = self.git(self.repo, "rev-parse", "feat")
         self.assertIn(f"git diff {main_sha}...{feat_sha}", call["args"][-1])  # 提示词是最后一个参数，用固定提交号
         self.assertIn("VERDICT: PASS", call["args"][-1])
+        # 记下的是一个审核单元：顶端是分支顶端，里面是这一段的两个提交
+        self.assertEqual(self.units(), [(feat_sha, set(self.git(self.repo, "rev-list", "main..feat").split()))])
 
         # 3. 同一条合并命令放行，真的合并
         self.assert_allowed(merge)
@@ -166,7 +180,7 @@ class LeadFlow(unittest.TestCase):
         self.assertIn("有 1 个提交", err)
         self.assert_blocked("git push origin main")
         args = self.review_line(err)
-        self.assertEqual(args[1:5], ["--branch", "main", "--base", "origin/main"])
+        self.assertEqual(args[1:5], ["--branch", "main", "--base", "refs/remotes/origin/main"])
 
         # 6. 审核过之后放行
         code, out = self.run_review(args, "VERDICT: PASS")
@@ -219,11 +233,76 @@ class LeadFlow(unittest.TestCase):
         # 主分支前进（审核过的提交），子代理在任务分支上 rebase
         self.write(self.repo, "app.py", "v3\n")
         self.git(self.repo, "commit", "-q", "-am", "主分支前进")
-        records.add_passed(self.repo, [self.git(self.repo, "rev-parse", "HEAD")])
+        head = self.git(self.repo, "rev-parse", "HEAD")
+        records.add_unit(self.repo, head, [head])
         self.git(wt, "rebase", "-q", "main")
         self.assert_blocked("git merge feat3")
         self.assertEqual(self.run_review(args, "VERDICT: PASS")[0], 0)
         self.assert_allowed("git merge feat3")
+
+    def test_整批审核通过_只上传其中一部分被拦(self):
+        """Codex 第 2 轮第 1 条：A 引入问题、B 撤销，整段审核通过。之后单独合并或推送 A 必须拦。"""
+        wt = os.path.join(self.tmp, "wt-sneak")
+        self.git(self.repo, "worktree", "add", "-q", "-b", "sneak", wt)
+        self.write(wt, "evil.py", "有问题的代码\n")
+        self.git(wt, "add", "-A")
+        self.git(wt, "commit", "-q", "-m", "A：引入问题")
+        a = self.git(wt, "rev-parse", "HEAD")
+        self.git(wt, "rm", "-q", "evil.py")
+        self.git(wt, "commit", "-q", "-m", "B：撤销")
+        b = self.git(wt, "rev-parse", "HEAD")
+        self.git(self.repo, "branch", "only-a", a)
+
+        # 整段合起来没改文件：review.py 不调 Codex，记成一个单元（顶端是 B）
+        args = self.review_line(self.assert_blocked("git merge sneak"))
+        code, out = self.run_review(args, "VERDICT: FAIL")  # 假 Codex 根本不会被调用
+        self.assertEqual((code, out.splitlines()[0]), (0, "审核：没有改动"), out)
+        self.assertFalse(os.path.exists(self.calls_file))
+        self.assertEqual(self.units(), [(b, {a, b})])
+
+        # 整段一起上可以；只带 A 的，合并、推送、开 PR 都拦
+        self.assert_allowed("git merge sneak")
+        self.assert_allowed("git push -u origin sneak")
+        for cmd in ("git merge only-a", "git push -u origin only-a", "git push origin only-a:main",
+                    "gh pr create --head only-a"):
+            err = self.assert_blocked(cmd)
+            self.assertIn("有 1 个提交", err)
+            self.assertIn("不能只上传其中一部分", err)
+        # 绕过合并关把 A 挪进主分支，推送时照样拦，远端拿不到 A
+        self.git(self.repo, "merge", "-q", "--ff-only", "only-a")
+        self.assert_blocked("git push")
+        self.assert_blocked("git push origin main")
+        # B 也进来之后整段都在，放行，真的推上去
+        self.git(self.repo, "merge", "-q", "--ff-only", "sneak")
+        self.assert_allowed("git push")
+        self.git(self.repo, "push", "-q")
+        self.assertEqual(self.git(os.path.join(self.tmp, "origin.git"), "rev-parse", "main"), b)
+
+    def test_多个任务分支先后合并_快进和非快进_推主分支都不误拦(self):
+        for name in ("t1", "t2", "t3"):
+            self.task_branch(name)  # 三个任务分支都从同一个 main 分出去，各改各的文件
+        self.review_and_merge("t1")            # 快进
+        self.review_and_merge("t2", "--no-ff")  # 主分支已经前进了：合并提交
+        self.assert_allowed("git push")        # 合了两个，先推一次
+        self.git(self.repo, "push", "-q")
+        self.review_and_merge("t3")            # 默认策略，也是合并提交
+        self.assertEqual(len(self.git(self.repo, "rev-list", "--merges", "origin/main..main").split()), 1)
+        for cmd in ("git push", "git push origin main", "git push origin main:main", "git push -u origin main"):
+            self.assert_allowed(cmd)
+        self.git(self.repo, "push", "-q")
+        self.assert_allowed("git push")  # 推完没有要上传的提交
+        self.assertEqual(len(self.units()), 3)
+
+    def test_上传命令和别的命令写在一起_被拦(self):
+        self.task_branch("feat4", n=1)
+        args = self.review_line(self.assert_blocked("git merge feat4"))
+        self.assertEqual(self.run_review(args, "VERDICT: PASS")[0], 0)
+        self.assert_allowed("git merge feat4")
+        for cmd in ("(cd / && pwd); git merge feat4", f"cd {self.repo} && git merge feat4", "git merge feat4 && git push",
+                    "git push origin :"):
+            code, err = self.guard(cmd)
+            self.assertEqual(code, 2, cmd)
+            self.assertTrue(err.startswith(PREFIX), err)
 
 
 if __name__ == "__main__":

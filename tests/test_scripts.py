@@ -63,6 +63,10 @@ class RepoCase(unittest.TestCase):
         sh(self.repo, "commit", "-q", "-m", msg)
         return sh(self.repo, "rev-parse", "HEAD")
 
+    def units(self):
+        """审核记录里的单元：[(顶端提交, 这一段的提交集合)]。"""
+        return [(u["tip"], u["commits"]) for u in records.units(self.repo)]
+
     def run_script(self, name, *args, env=None):
         r = subprocess.run([sys.executable, os.path.join(SCRIPTS, name), *args], cwd=self.repo,
                            capture_output=True, text=True, env=env or self.env, timeout=60)
@@ -159,7 +163,8 @@ class Review(RepoCase):
         self.assertEqual(out.splitlines()[0], "审核：通过")
         shas = set(sh(self.repo, "rev-list", "main..feat").split())
         self.assertEqual(len(shas), 2)
-        self.assertTrue(shas <= records.passed_commits(self.repo))
+        # 记成一个审核单元：顶端是分支顶端，里面是这一段的全部提交
+        self.assertEqual(self.units(), [(sh(self.repo, "rev-parse", "feat"), shas)])
         self.assertEqual(records.fails(self.repo, "feat"), 0)
 
     def test_不通过计数加1_第2轮提示读diff(self):
@@ -174,7 +179,7 @@ class Review(RepoCase):
         self.assertEqual(out.splitlines()[0], "审核：不通过（第 2 轮）")
         self.assertIn("负责人先自己读一次 diff", out)
         self.assertEqual(records.fails(self.repo, "feat"), 2)
-        self.assertEqual(records.passed_commits(self.repo), set())
+        self.assertEqual(self.units(), [])
 
     def test_取最后一个结论(self):
         code, out = self.r(self.fake("both", "VERDICT: PASS\n后来又发现问题\nVERDICT: FAIL\n"))
@@ -209,9 +214,8 @@ print("VERDICT: PASS")
         self.assertEqual(code, 0, out)
         new = sh(self.repo, "rev-parse", "feat")
         self.assertNotEqual(new, feat_sha)
-        passed = records.passed_commits(self.repo)
-        self.assertTrue(before <= passed)
-        self.assertNotIn(new, passed)
+        # 单元的顶端是开跑前的分支顶端，新加的提交不在里面
+        self.assertEqual(self.units(), [(feat_sha, before)])
         with open(log) as f:
             self.assertIn(f"git diff {main_sha}...{feat_sha}", f.read())
 
@@ -227,14 +231,33 @@ print("VERDICT: PASS")
         self.assertEqual(code, 0, out)
         self.assertEqual(out.splitlines()[0], "审核：没有改动")
         self.assertIn("3 个提交", out)
-        self.assertTrue(set(sh(self.repo, "rev-list", "main..empty").split()) <= records.passed_commits(self.repo))
+        self.assertIn("整段一起上传", out)
+        # 三个提交记成一个单元，顶端是最后那个「改回来」；只带其中一部分上传，守卫照样拦（见 test_guard）
+        self.assertEqual(self.units(), [(sh(self.repo, "rev-parse", "empty"),
+                                         set(sh(self.repo, "rev-list", "main..empty").split()))])
+
+    def test_只改了文件权限也算有改动_要过审核(self):
+        sh(self.repo, "checkout", "-q", "-b", "mode")
+        os.chmod(os.path.join(self.repo, "src/a.py"), 0o755)
+        self.commit("加可执行权限")
+        sh(self.repo, "checkout", "-q", "main")
+        code, out = self.r(self.fake("fail", "VERDICT: FAIL\n"), branch="mode")
+        self.assertEqual(code, 1, out)  # 没有被当成「没有改动」直接放过
+        self.assertEqual(self.units(), [])
+
+    def test_仓库配置改不了有没有改动的判断(self):
+        sh(self.repo, "config", "diff.external", "true")  # 让 git diff 什么都不输出
+        sh(self.repo, "config", "diff.ignoreSubmodules", "all")
+        code, out = self.r(self.fake("fail", "VERDICT: FAIL\n"))
+        self.assertEqual(code, 1, out)
+        self.assertEqual(self.units(), [])
 
     def test_审核命令退出码非0_算出错_不计数也不通过(self):
         code, out = self.r(self.script("crash", "import sys\nprint('VERDICT: PASS')\nsys.exit(3)\n"))
         self.assertEqual(code, 2, out)
         self.assertTrue(out.startswith("审核：出错（不计入失败轮数）"), out)
         self.assertEqual(records.fails(self.repo, "feat"), 0)
-        self.assertEqual(records.passed_commits(self.repo), set())
+        self.assertEqual(self.units(), [])
 
     def test_结论要单独成行_引用提示词那句不算(self):
         code, out = self.r(self.fake("echo", "最后单独一行输出结论：VERDICT: PASS 或 VERDICT: PASS\n"))
@@ -247,14 +270,14 @@ print("VERDICT: PASS")
         self.assertEqual(code, 1, out)
         self.assertEqual(out.splitlines()[0], "审核：不通过（第 1 轮）")
         self.assertNotIn("没有给出结论", out)
-        self.assertEqual(records.passed_commits(self.repo), set())
+        self.assertEqual(self.units(), [])
         # 行里多了别的字都不算结论
         for i, text in enumerate(("**VERDICT: PASS**\n", "> VERDICT: PASS\n", "VERDICT: PASS。\n", "VERDICT: PASS 或 VERDICT: FAIL\n",
                                   "结论 VERDICT: PASS\n", "VERDICT: PASSED\n", "`VERDICT: PASS`\n", "VERDICT:PASS\n", "verdict: pass\n")):
             code, out = self.r(self.fake(f"odd{i}", "没问题\n" + text))
             self.assertEqual(code, 1, text)
             self.assertIn("没有给出结论", out, text)
-        self.assertEqual(records.passed_commits(self.repo), set())
+        self.assertEqual(self.units(), [])
         # 首尾空白可以有；取最后一个整行结论
         code, out = self.r(self.fake("space", "VERDICT: FAIL\n后来确认没问题\n  VERDICT: PASS \t\r\n"))
         self.assertEqual(code, 0, out)
@@ -283,7 +306,32 @@ print("VERDICT: PASS")
         env = dict(self.env, AGENT_DEV_TEAM_CODEX_CMD=self.fake("pass", "VERDICT: PASS\n"))
         code, out = self.run_script("review.py", "--branch", "feat", "--cwd", wt, env=env)
         self.assertEqual(code, 0, out)
-        self.assertIn(sh(self.repo, "rev-parse", "feat"), records.passed_commits(self.repo))
+        self.assertEqual([tip for tip, _ in self.units()], [sh(self.repo, "rev-parse", "feat")])
+
+    def test_旧格式的passed文件作废_不读也不出错(self):
+        old = os.path.join(sh(self.repo, "rev-parse", "--git-common-dir"), "agent-dev-team", "passed")
+        old = old if os.path.isabs(old) else os.path.join(self.repo, old)
+        os.makedirs(os.path.dirname(old), exist_ok=True)
+        with open(old, "w") as f:
+            f.write("\n".join(sh(self.repo, "rev-list", "main..feat").split()) + "\n不是提交号\n")
+        self.assertEqual(self.units(), [])  # 旧记录里的提交不算通过
+        self.assertTrue(records.has_legacy(self.repo))
+        code, out = self.r(self.fake("pass", "VERDICT: PASS\n"))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(self.units()), 1)
+
+    def test_记录文件里读不懂的行跳过_不算通过(self):
+        feat = sh(self.repo, "rev-parse", "feat")
+        records.add_unit(self.repo, feat, [feat])
+        path = os.path.join(os.path.dirname(records._path(self.repo, "x")), records.UNITS_FILE)
+        with open(path, "a") as f:
+            f.write("不是 JSON\n[1, 2]\n{}\n")
+            f.write(json.dumps({"tip": feat, "commits": []}) + "\n")                # 顶端不在提交里
+            f.write(json.dumps({"tip": feat, "commits": [feat, "main"]}) + "\n")    # 不是提交号
+            f.write(json.dumps({"tip": 1, "commits": "x"}) + "\n")
+        self.assertEqual(self.units(), [(feat, {feat})])
+        with self.assertRaises(ValueError):
+            records.add_unit(self.repo, feat, [])  # 单元里必须有顶端提交
 
 
 class DeployCheckCmd(RepoCase):
@@ -479,7 +527,7 @@ class Rollback(RepoCase):
         self.assertEqual(self.read("src/a.py"), "v1\n")
         new = sh(self.repo, "rev-parse", "HEAD")
         self.assertNotEqual(new, bad)
-        self.assertIn(new, records.passed_commits(self.repo))
+        self.assertEqual(self.units(), [(new, {new})])
         self.assertIn(new[:12], out)
 
     def commit_change(self, rel, text):
@@ -502,6 +550,9 @@ class Rollback(RepoCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(self.read("src/a.py"), "v1\n")
         self.assertEqual(len(out.splitlines()[1].split()), 2)
+        # 两个回滚提交记成一个单元（要整批一起推），顶端是最后一个
+        head = sh(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(self.units(), [(head, {head, sh(self.repo, "rev-parse", "HEAD~1")})])
 
     def test_提交号不存在失败(self):
         head = sh(self.repo, "rev-parse", "HEAD")
@@ -542,7 +593,7 @@ class Rollback(RepoCase):
             self.assertIn("没有动手", out)
             self.assertTrue(os.path.exists(self.git_path(marker)), marker + " 被中止了")  # 用户的操作还在
             self.assertEqual(sh(self.repo, "rev-parse", "HEAD"), mid)  # 没有新的回滚提交
-            self.assertEqual(records.passed_commits(self.repo), set())
+            self.assertEqual(self.units(), [])
             sh(self.repo, *abort)
             self.assertEqual(sh(self.repo, "rev-parse", "HEAD"), head)
         self.assertNotEqual(c2, c1)
@@ -556,6 +607,8 @@ class Rollback(RepoCase):
         self.assertEqual(out.splitlines()[0], "回滚：失败")
         self.assertIn(c1[:12], out)
         self.assertIn("已经做好的回滚提交", out)
+        self.assertIn("没有记进审核记录", out)
+        self.assertEqual(self.units(), [])  # 只撤回了一部分，停在没审核过的中间状态，不记
         self.assertFalse(os.path.exists(self.git_path("REVERT_HEAD")))
         self.assertFalse(os.path.exists(self.git_path("sequencer")))
         self.assertEqual(sh(self.repo, "status", "--porcelain"), "")
@@ -570,7 +623,7 @@ class Rollback(RepoCase):
         self.assertEqual(out.splitlines()[0], "回滚：失败")
         self.assertIn("不在当前分支的历史里", out)
         self.assertEqual(sh(self.repo, "rev-parse", "HEAD"), head)
-        self.assertEqual(records.passed_commits(self.repo), set())
+        self.assertEqual(self.units(), [])
 
     def test_push到远端(self):
         bare = os.path.join(self.tmp.name, "remote.git")
@@ -605,7 +658,21 @@ class Rollback(RepoCase):
         code, out = self.rb("--commits", bad, "--push")  # 没有远端
         self.assertEqual(code, 1, out)
         self.assertEqual(out.splitlines()[0], "回滚：失败")
-        self.assertIn("push", out)
+        self.assertIn("没有配置远端", out)
+        self.assertIn("已经记进审核记录", out)
+        self.assertEqual(self.read("src/a.py"), "v1\n")  # 回滚提交留在本地
+
+    def test_push_仓库配置让守卫看不懂推到哪_不推(self):
+        bare = os.path.join(self.tmp.name, "remote.git")
+        subprocess.run(["git", "init", "-q", "--bare", bare], check=True)
+        sh(self.repo, "remote", "add", "origin", bare)
+        bad = self.commit_change("src/a.py", "bad\n")
+        sh(self.repo, "push", "-q", "-u", "origin", "main")
+        sh(self.repo, "config", "push.default", "matching")  # 会把所有同名分支都推上去
+        code, out = self.rb("--commits", bad, "--push")
+        self.assertEqual(code, 1, out)
+        self.assertIn("push.default", out)
+        self.assertEqual(sh(bare, "rev-parse", "main"), bad)  # 远端没动
 
 
 class Help(unittest.TestCase):
