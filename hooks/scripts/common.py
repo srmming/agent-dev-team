@@ -99,13 +99,17 @@ def guard_off(root):
 
 
 def role(data):
-    """返回 none / normal / subagent / kuaixiu / lead。"""
+    """返回 none / normal / subagent / kuaixiu / lead。
+    顺序：守卫关了 → none；对话标成普通对话 → normal（普通对话里开的后台子代理也不拦）；
+    有 agent_id → subagent；对话记下的角色；kuaixiu/ 分支 → kuaixiu；其余 lead。"""
     cwd = data.get("cwd") or os.getcwd()
     if guard_off(project_root(cwd)):
         return "none"
+    saved = load_session(session_id(data)).get("role")
+    if saved == "normal":
+        return "normal"
     if data.get("agent_id"):
         return "subagent"
-    saved = load_session(session_id(data)).get("role")
     if saved in ROLES:
         return saved
     branch = git(cwd, "rev-parse", "--abbrev-ref", "HEAD") or ""
@@ -134,6 +138,7 @@ NORMAL_TEXT = "【Agent 开发团队】这个对话是「普通对话」，这�
 KUAIXIU_TEXT = (
     "【Agent 开发团队】这个对话是「对接窗口」（快修）。和用户一起做简单沟通和小改动，"
     "可以直接改文件和 commit，但只在当前分支上，不能 push、不能合并。"
+    "要跟上主分支用 git rebase（git merge 会被守卫拦）。"
     "发现是大改动就停下，告诉用户交回负责人正常派活。"
     "用户说「没问题了」后：提交到当前分支，写一段改动摘要（改了什么、动了哪些文件、怎么验证的），"
     "发消息给负责人会话交回；发不了就把摘要给用户，请他转给负责人。"
@@ -142,6 +147,7 @@ KUAIXIU_TEXT = (
 SUBAGENT_TEXT = (
     "【Agent 开发团队】这个窗口是「子代理」。只做派活单范围内的事；"
     "只在派活单指定的分支 / 工作副本上干活并 commit，不 push、不合并、不开 PR；"
+    "解决合并冲突用 git rebase（git merge 会被守卫拦）；"
     "交回前自己跑一遍完成标准，写真实结果；卡住就停下交回；不联系 Dot，不写 Notion；交回 20 行以内。"
 )
 

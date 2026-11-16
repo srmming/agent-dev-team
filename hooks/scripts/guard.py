@@ -604,10 +604,12 @@ def main():
         cmd = inp.get("command", "") or ""
         if r == "subagent":
             if has_ship(cmd):
-                block("子代理不能 push / 合并 / 开 PR。提交到自己的分支，把结果交回负责人。")
+                block("子代理不能 push / 合并 / 开 PR。提交到自己的分支，把结果交回负责人。"
+                      "要跟上主分支或解决合并冲突，用 git rebase。")
         elif r == "kuaixiu":
             if has_ship(cmd):
-                block("对接窗口不能 push / 合并 / 开 PR。提交到当前分支后交回负责人，由负责人验收、过 Codex 审核再合并。")
+                block("对接窗口不能 push / 合并 / 开 PR。提交到当前分支后交回负责人，由负责人验收、过 Codex 审核再合并。"
+                      "要跟上主分支，用 git rebase。")
         else:
             reason = check_lead_bash(cmd) or check_ship(cwd, cmd, auto_mode(data))
             if reason:

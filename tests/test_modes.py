@@ -99,8 +99,19 @@ class RoleTest(Base):
 
     def test_2_有agent_id就是子代理_比状态文件优先(self):
         repo = self.make_repo()
+        data = {"session_id": "s1", "cwd": repo, "agent_id": "a1"}
+        self.assertEqual(common.role(data), "subagent")
+        for r in ("lead", "subagent", "kuaixiu"):
+            self.set_state("s1", role=r)
+            self.assertEqual(common.role(data), "subagent", r)
+
+    def test_2_普通对话里的后台子代理_按普通对话(self):
+        repo = self.make_repo()
         self.set_state("s1", role="normal")
-        self.assertEqual(common.role({"session_id": "s1", "cwd": repo, "agent_id": "a1"}), "subagent")
+        data = {"session_id": "s1", "cwd": repo, "agent_id": "a1"}
+        self.assertEqual(common.role(data), "normal")
+        with mock.patch.dict(os.environ, {"AGENT_DEV_TEAM": "off"}):
+            self.assertEqual(common.role(data), "none")  # 守卫关掉仍然排最前
 
     def test_3_状态文件里有role就用它(self):
         repo = self.make_repo()

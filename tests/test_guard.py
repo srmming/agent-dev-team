@@ -454,6 +454,15 @@ class RolesTest(GuardCase):
         for tool, inp in self.edits(repo):
             self.allow(repo, inp, tool=tool)
 
+    def test_normal_普通对话里开的后台子代理_也放行上传(self):
+        repo = self.unreviewed_repo()
+        self.set_state(role="normal")
+        for cmd in self.SHIPS:
+            self.allow(repo, cmd, agent_id="a1", agent_type="agent-dev-team:dev-opus")
+        # 负责人模式里开的后台子代理照样拦
+        self.set_state(role="lead")
+        self.deny(repo, "git push", "子代理不能 push", agent_id="a1")
+
     def test_subagent_后台子代理_只拦上传(self):
         repo = self.unreviewed_repo()
         for cmd in self.SHIPS:

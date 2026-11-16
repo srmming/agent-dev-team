@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """agent-dev-team 审核：调 Codex 审一个分支的改动，通过就把提交记进通过记录。
-输出第一行是结论。退出码：通过或没有改动 0，不通过 1，找不到审核命令或超时 2。
+输出第一行是结论。退出码：通过或没有改动 0，不通过 1，
+出错（不是仓库、找不到分支、找不到审核命令、超时）2，出错不计入失败轮数。
 """
 import argparse
-import json
 import os
 import re
 import shlex
@@ -11,20 +11,8 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import git, repo_root  # noqa: E402
+from common import git, project_config, repo_root  # noqa: E402
 import records  # noqa: E402
-
-try:
-    from common import project_config  # noqa: E402
-except ImportError:
-    def project_config(root):
-        """读 <项目根>/.claude/agent-dev-team.json，不存在或坏了返回 {}。"""
-        try:
-            with open(os.path.join(root, ".claude", "agent-dev-team.json")) as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
 
 DEFAULT_CMD = "codex exec --sandbox read-only -c model_reasoning_effort=max"
 TIMEOUT = 1800

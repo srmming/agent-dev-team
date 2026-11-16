@@ -224,6 +224,17 @@ class DeployCheckCmd(RepoCase):
         self.assertIn("2 次", out)
         self.assertIn("服务挂了", out)
 
+    def test_配置里的数字写错了_用默认值_不报错(self):
+        self.write(".claude/agent-dev-team.json", json.dumps(
+            {"deploy_check": {"cmd": "exit 1", "wait_seconds": "很久", "retries": "x", "interval_seconds": -5}}))
+        self.assertEqual(deploy_check._num("很久", 60, float), 60)
+        self.assertEqual(deploy_check._num(-5, 30, float), 30)
+        self.assertEqual(deploy_check._num("2", 3, int), 2)
+        # 等待和间隔用参数覆盖成 0；重试次数用默认的 3 次，一共跑 4 次
+        code, out = self.d()
+        self.assertEqual(code, 1, out)
+        self.assertIn("试了 4 次", out)
+
     def test_什么都没配_远端不是GitHub_无法判断(self):
         sh(self.repo, "remote", "add", "origin", "https://gitlab.com/a/b.git")
         code, out = self.d()

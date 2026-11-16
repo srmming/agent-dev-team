@@ -16,19 +16,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import git, repo_root  # noqa: E402
-
-try:
-    from common import project_config  # noqa: E402
-except ImportError:
-    def project_config(root):
-        """读 <项目根>/.claude/agent-dev-team.json，不存在或坏了返回 {}。"""
-        try:
-            with open(os.path.join(root, ".claude", "agent-dev-team.json")) as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
+from common import git, project_config, repo_root  # noqa: E402
 
 TAIL = 30
 CMD_TIMEOUT = 300
@@ -115,11 +103,20 @@ def github_status(cwd, repo, sha):
     return "none", ["GitHub 上这个提交没有检查结果，也没有部署记录"]
 
 
+def _num(value, default, cast):
+    """项目配置里的数字：写错了（不是数字或是负数）就用默认值。"""
+    try:
+        n = cast(value)
+    except (TypeError, ValueError):
+        return default
+    return n if n >= 0 else default
+
+
 def check_by_cmd(cwd, dc, a):
     cmd = dc["cmd"]
-    wait = a.wait if a.wait is not None else float(dc.get("wait_seconds", 60))
-    interval = a.interval if a.interval is not None else float(dc.get("interval_seconds", 30))
-    retries = a.retries if a.retries is not None else int(dc.get("retries", 3))
+    wait = a.wait if a.wait is not None else _num(dc.get("wait_seconds", 60), 60, float)
+    interval = a.interval if a.interval is not None else _num(dc.get("interval_seconds", 30), 30, float)
+    retries = a.retries if a.retries is not None else _num(dc.get("retries", 3), 3, int)
     if wait > 0:
         time.sleep(wait)
     out, code = "", None
