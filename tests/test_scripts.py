@@ -511,6 +511,67 @@ class Rollback(RepoCase):
         self.assertIn("deadbeef1234", out)
         self.assertEqual(sh(self.repo, "rev-parse", "HEAD"), head)
 
+    def git_path(self, name):
+        return os.path.join(self.repo, sh(self.repo, "rev-parse", "--git-path", name))
+
+    def conflict(self, *args):
+        """跑一条会冲突的 git 命令，留下没做完的操作。"""
+        r = subprocess.run(["git", *args], cwd=self.repo, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0, args)
+
+    def test_已有没做完的操作时不动手_不中止用户的操作(self):
+        # Codex 第 2 轮：以前 revert 失败后无条件 git revert --abort，会把用户原来的 revert 中止掉
+        c1 = self.commit_change("src/a.py", "v3\n")
+        c2 = self.commit_change("src/a.py", "v4\n")
+        other = self.commit_change("docs/other.md", "x\n")
+        cases = (
+            ("REVERT_HEAD", ("revert", "--no-edit", c1), ("revert", "--abort"), "revert"),
+            ("CHERRY_PICK_HEAD", ("cherry-pick", "feat~1"), ("cherry-pick", "--abort"), "cherry-pick"),
+            ("MERGE_HEAD", ("merge", "--no-edit", "feat"), ("merge", "--abort"), "merge"),
+            ("rebase-merge", ("rebase", "feat"), ("rebase", "--abort"), "rebase"),
+        )
+        for marker, start, abort, word in cases:
+            head = sh(self.repo, "rev-parse", "HEAD")
+            self.conflict(*start)
+            self.assertTrue(os.path.exists(self.git_path(marker)), marker)
+            mid = sh(self.repo, "rev-parse", "HEAD")
+            code, out = self.rb("--commits", other)
+            self.assertEqual(code, 1, out)
+            self.assertEqual(out.splitlines()[0], "回滚：失败")
+            self.assertIn("没做完的 " + word, out)
+            self.assertIn("没有动手", out)
+            self.assertTrue(os.path.exists(self.git_path(marker)), marker + " 被中止了")  # 用户的操作还在
+            self.assertEqual(sh(self.repo, "rev-parse", "HEAD"), mid)  # 没有新的回滚提交
+            self.assertEqual(records.passed_commits(self.repo), set())
+            sh(self.repo, *abort)
+            self.assertEqual(sh(self.repo, "rev-parse", "HEAD"), head)
+        self.assertNotEqual(c2, c1)
+
+    def test_自己这次撤回冲突了_中止自己的_前面做好的留着(self):
+        c1 = self.commit_change("src/a.py", "v3\n")
+        self.commit_change("src/a.py", "v4\n")
+        other = self.commit_change("docs/other.md", "x\n")
+        code, out = self.rb("--commits", other, c1)  # 撤回 c1 会和后面的 v4 冲突
+        self.assertEqual(code, 1, out)
+        self.assertEqual(out.splitlines()[0], "回滚：失败")
+        self.assertIn(c1[:12], out)
+        self.assertIn("已经做好的回滚提交", out)
+        self.assertFalse(os.path.exists(self.git_path("REVERT_HEAD")))
+        self.assertFalse(os.path.exists(self.git_path("sequencer")))
+        self.assertEqual(sh(self.repo, "status", "--porcelain"), "")
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "docs/other.md")))  # 第一个撤回做好了
+        self.assertEqual(self.read("src/a.py"), "v4\n")
+
+    def test_提交不在当前分支的历史里_不撤回(self):
+        # 撤回别的分支上的提交，等于往当前分支加一段没审核过的改动
+        head = sh(self.repo, "rev-parse", "HEAD")
+        code, out = self.rb("--commits", "feat")
+        self.assertEqual(code, 1, out)
+        self.assertEqual(out.splitlines()[0], "回滚：失败")
+        self.assertIn("不在当前分支的历史里", out)
+        self.assertEqual(sh(self.repo, "rev-parse", "HEAD"), head)
+        self.assertEqual(records.passed_commits(self.repo), set())
+
     def test_push到远端(self):
         bare = os.path.join(self.tmp.name, "remote.git")
         subprocess.run(["git", "init", "-q", "--bare", bare], check=True)

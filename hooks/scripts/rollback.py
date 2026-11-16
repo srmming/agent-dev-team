@@ -12,6 +12,9 @@ from common import git, repo_root  # noqa: E402
 import records  # noqa: E402
 
 TAIL = 30
+# 仓库里没做完的操作：<git 目录>下有这些文件或目录就是还在进行中
+BUSY = (("REVERT_HEAD", "revert"), ("CHERRY_PICK_HEAD", "cherry-pick"), ("MERGE_HEAD", "merge"),
+        ("rebase-merge", "rebase"), ("rebase-apply", "rebase 或 am"), ("sequencer", "revert 或 cherry-pick"))
 
 
 def run_git(cwd, *args):
@@ -26,6 +29,15 @@ def run_git(cwd, *args):
 
 def tail(text, n=TAIL):
     return "\n".join(text.splitlines()[-n:])
+
+
+def in_progress(cwd):
+    """仓库里有没有没做完的 revert / cherry-pick / merge / rebase。有就返回它的名字，没有返回 None。"""
+    for name, label in BUSY:
+        p = git(cwd, "rev-parse", "--git-path", name)
+        if p and os.path.exists(os.path.join(cwd, p)):
+            return label
+    return None
 
 
 def fail(msg, done):
@@ -59,12 +71,19 @@ def main(argv=None):
     if not os.path.isdir(cwd) or not repo_root(cwd):
         return fail(f"{cwd} 不是 git 仓库", [])
 
+    # 仓库里已经有没做完的操作时不动手：这里失败后要 git revert --abort，不能把用户原来的操作中止掉
+    busy = in_progress(cwd)
+    if busy:
+        return fail(f"仓库里有没做完的 {busy}，回滚没有动手。先把它做完或中止（比如 git {busy.split()[0]} --abort），再重新回滚。", [])
+
     # 先把所有提交号都确认一遍，有一个不对就一个都不动
     targets = []
     for c in a.commits:
         sha = git(cwd, "rev-parse", "--verify", "--quiet", c + "^{commit}")
         if not sha:
             return fail(f"找不到提交 {c}", [])
+        if git(cwd, "merge-base", "--is-ancestor", sha, "HEAD") is None:
+            return fail(f"提交 {c} 不在当前分支的历史里，不能在这里撤回。", [])
         parents = (git(cwd, "rev-list", "--parents", "-n", "1", sha) or "").split()
         targets.append((sha, len(parents) > 2))
 
@@ -73,7 +92,7 @@ def main(argv=None):
         args = ["revert", "--no-edit"] + (["-m", "1"] if is_merge else []) + [sha]
         code, out = run_git(cwd, *args)
         if code != 0:
-            run_git(cwd, "revert", "--abort")
+            run_git(cwd, "revert", "--abort")  # 开头查过没有别的操作在进行，这里中止的只会是自己这次
             if done:
                 records.add_passed(cwd, done)
             return fail(f"撤回 {sha[:12]} 失败：\n{tail(out)}", done)
