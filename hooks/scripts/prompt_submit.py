@@ -27,7 +27,7 @@ EXACT = {
 
 
 WRAP_HEAD = "Background (from the session that started this one):"
-MARKS = ("【派活单】", "【快修】")
+MARKS = ("【派活单】", "【快修】", "【升档】")
 # 派活单第二行：子代理：<名字> · <档位>
 AGENT_LINE = re.compile(r"^子代理\s*[：:]\s*([A-Za-z0-9_.-]+)\s*[·・]\s*(低|中|高)\s*$")
 
@@ -62,6 +62,15 @@ def dispatch_info(text):
     return {"task": task, "agent": agent, "effort": effort}
 
 
+def upgrade_info(text):
+    """升档消息：第一行完全等于【升档】，第二行正好是 AGENT_LINE 的格式。按原文逐行比，不对就返回 None。"""
+    lines = text.splitlines()
+    if len(lines) < 2 or lines[0] != "【升档】":
+        return None
+    m = AGENT_LINE.match(lines[1])
+    return {"agent": m.group(1), "effort": m.group(2)} if m else None
+
+
 def decide(prompt, data):
     """返回 (要改的状态, 注入的附加上下文)；不用切换时返回 (None, None)。"""
     text = unwrap((prompt or "").strip())
@@ -70,6 +79,10 @@ def decide(prompt, data):
         return dict(role="subagent", **dispatch_info(text)), (
             "【Agent 开发团队】这个窗口是子代理，忽略之前的负责人提示。按下面的守则完成这张派活单。\n\n"
             + rules_text())
+    if text.startswith("【升档】"):
+        info = upgrade_info(text)
+        # 只在当前已经是子代理窗口时生效：只改名字和档位，不改角色，也不再注入守则
+        return (info, None) if info and role(data) == "subagent" else (None, None)
     if text.startswith("【快修】"):
         return {"role": "kuaixiu"}, "这个窗口是对接窗口（快修），忽略之前的负责人提示。\n" + KUAIXIU_TEXT
     if text not in EXACT:
@@ -97,6 +110,8 @@ def main():
     changes, note = decide(prompt, data)
     if changes:
         save_session(session_id(data), **changes)
+        if note is None:
+            return  # 升档：只更新状态，不输出
     r, told = role(data), load_told(session_id(data))
     if not changes:
         if told == told_key(r, data):
