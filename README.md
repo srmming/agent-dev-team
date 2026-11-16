@@ -16,7 +16,7 @@
 | 子代理 | dev-sonnet | 一般任务（范围清楚、有现成写法、一条命令能验证、不用做设计取舍） |
 | 子代理 | dev-opus | 主力开发 |
 | 子代理 | dev-fable | 重构、改架构、跨多模块 |
-| 钩子 | guard.py | 负责人不能改项目文件；子代理和对接窗口不能 push / 合并；负责人合并和推送前查审核记录，看不懂的上传命令一律拦 |
+| 钩子 | guard.py | 负责人不能改项目文件；负责人合并和推送前查审核记录，上传命令只认最简单的写法；子代理和对接窗口不能 push / 合并（防手误） |
 | 钩子 | session_start.py | 会话开始时告诉窗口它是什么角色，给出脚本的绝对路径 |
 | 钩子 | prompt_submit.py | 根据你发的消息切换模式 |
 
@@ -72,7 +72,7 @@
 
 - verify.py：查 `<基准>...<分支>` 改了的文件有没有超出 `--allow`（不给就不查；改名时新旧路径都算），再按顺序跑 `--cmd`，第一条失败（退出码非 0 或超时，默认每条 900 秒）就停，打印输出的最后 30 行。基准默认是主分支。
 - review.py：开跑前先把基准和分支固定成提交号，Codex 审的就是这两个提交号之间的改动；审核期间分支上再加的提交不算。超时 1800 秒。结论只认整行就是 `VERDICT: PASS` 或 `VERDICT: FAIL` 的行（首尾可以有空白；加粗、引用、行里还有别的字都不算），取最后一个，没有结论按不通过。通过时记一个「审核单元」（见下面「审核记录」），清掉失败轮数；不通过时轮数加 1，打印问题清单（最多 60 行），第 2 轮起提醒负责人自己读一次 diff。分支有提交但合起来没改文件（空提交、改了又改回来；直接比分叉点和分支顶端的文件树，不看 diff 的输出）时不调 Codex，打印「审核：没有改动」，同样记一个审核单元。不是仓库、找不到分支、git 查不出改动、找不到审核命令、审核命令退出码不是 0、超时都算出错，不计入轮数。
-- deploy_check.py：推送后检查线上。项目配置有 `deploy_check.cmd` 时：先等 `wait_seconds`（默认 60），跑命令，失败隔 `interval_seconds`（默认 30）重试，最多重试 `retries` 次（默认 3，一共跑 4 次）。没配命令、远端是 GitHub、本机有 `gh` 时：查这个提交的检查结果和部署状态；同名检查、同一环境的部署只看最新一次；还在跑就每 15 秒查一次，满 10 分钟（`--max-poll`）还没完判「无法判断」。有任何一项查询失败（没登录、没权限、网络）时不报通过：查到确定的失败报「不通过」，否则报「无法判断」。都没有：无法判断。
+- deploy_check.py：推送后检查线上。项目配置有 `deploy_check.cmd` 时：先等 `wait_seconds`（默认 60），跑命令，失败隔 `interval_seconds`（默认 30）重试，最多重试 `retries` 次（默认 3，一共跑 4 次）。没配命令、远端是 GitHub、本机有 `gh` 时：查这个提交的检查结果（check runs）、提交状态（commit statuses，有的 CI 只报这一套）和部署状态；同名检查、同一环境的部署只看最新一次；提交状态是 failure / error 算不通过，pending 按还在跑处理；还在跑就每 15 秒查一次，满 10 分钟（`--max-poll`）还没完判「无法判断」。有任何一项查询失败（没登录、没权限、网络）时不报通过：查到确定的失败报「不通过」，否则报「无法判断」。都没有：无法判断。
 - rollback.py：按给的顺序 `git revert --no-edit`（合并提交加 `-m 1`），提交号要从新到旧给。动手前先查三件事，有一件不对就一个都不动：仓库里有没有没做完的 revert / cherry-pick / merge / rebase（有就报「回滚：失败」，不去中止别人的操作）；提交号是不是都找得到；是不是都在当前分支的历史里。中途撤回失败时只中止自己这一次 revert，已经做好的回滚提交留在本地、在输出里列出来，但不记进审核记录（只撤回一部分，是没审核过的中间状态）。全部撤回成功后，如果内容和某个被撤回提交之前一模一样（平常的上线回滚都是这样），记一个审核单元，起点是那个「之前」的提交：那个状态已经上传过的话，推送不用再审。只撤回了中间一段、内容对不上的不记，输出里会提醒推送前要先审核。带 `--push` 时用守卫上传关的同一套规则查一遍（守卫看不懂会推到哪、有没审核的提交，都不推），再把当前分支推到同名的上游分支；`AGENT_DEV_TEAM_CODEX=off` 时不查，直接 `git push`。只撤回代码，不碰数据库。
 - 四个脚本自己出意外错误时，第一行分别是「验收：出错」「审核：出错（不计入失败轮数）」「上线检查：无法判断」「回滚：失败」，不会被当成通过。
 - mode.py：状态栏按钮和负责人用。`set` 至少带一个 `--role` / `--auto` / `--status`，改完打印一遍。
@@ -104,49 +104,59 @@
 ## 守卫怎么判
 
 - 普通对话、守卫关了：全部放行。
-- 子代理、对接窗口：命令里可能有上传动作就拦（见「上传关」第一步）。所以它们要跟上主分支或解决合并冲突，只能用 `git rebase`。
+- 子代理、对接窗口：命令里可能有上传动作就拦。所以它们要跟上主分支或解决合并冲突，只能用 `git rebase`。这一关靠拆命令来认，防的是手误，不防刻意构造的绕过（见下面「防什么、不防什么」）。
 - 负责人：
   1. 编辑工具改项目根目录（git 仓库根；不在仓库里就是当前目录）里的文件 → 拦。项目外的文件放行。
-  2. 命令行只拦写的动作：重定向写文件（写到 `/dev/null`、`/dev/stdout`、`/dev/stderr`、`/dev/tty` 和 `2>&1` 这类不算）；`rm` `mv` `cp` `tee` `touch` `truncate` `dd` `patch` `install` `ln` `chmod` `chown`；`sed -i` / `perl -i`；`git commit` `add` `checkout` `switch` `reset` `restore` `rebase` `cherry-pick` `stash` `apply` `am` `clean` `rm` `mv`；`find -delete / -exec / -execdir`。拆不开的命令（引号或括号没闭合、一层套一层套得太深）也拦，请改写。认命令时会剥掉开头的 `VAR=值`、`do` `then` `if` `!` `{` `time` 这类关键字和 `env` `sudo` `rtk` `timeout` `xargs` 等包装器。这部分是护栏，不是安全边界。
-  3. 上传关：见下面。
+  2. 命令行只拦写的动作：重定向写文件（写到 `/dev/null`、`/dev/stdout`、`/dev/stderr`、`/dev/tty` 和 `2>&1` 这类不算）；`rm` `mv` `cp` `tee` `touch` `truncate` `dd` `patch` `install` `ln` `chmod` `chown`；`sed -i` / `perl -i`；`git commit` `add` `checkout` `switch` `reset` `restore` `rebase` `cherry-pick` `stash` `apply` `am` `clean` `rm` `mv`；`find -delete / -exec / -execdir`。拆不开的命令（引号或括号没闭合、一层套一层套得太深）也拦，请改写。这部分是护栏，不是安全边界。
+  3. 上传关：见下面。它不靠拆命令。
   4. 半自动：有远端时拦在主分支上 `git merge <分支>`、拦推到主分支；`gh pr merge` 和 `gh api` 的写操作一律拦，PR 由用户自己点合并。查不出主分支是哪个时也拦。
 - 普通命令遇到守卫自己出错一律放行。负责人的上传命令遇到守卫出错、git 出错、查不出要上传什么，一律拦。
-- 守卫自己限时 20 秒（钩子的超时是 30 秒，钩子超时会被当成放行）。超时的时候，命令里出现 `push` / `merge` 这类词就拦，其余放行。
+- 守卫自己限时 20 秒（钩子的超时是 30 秒，钩子超时会被当成放行）。命令一读进来就登记，超时的时候（哪怕还在认角色），命令原文里出现 `push` / `merge` 这类词或者 `gh` 就拦，其余放行。
 
-### 上传关：看不懂就拦
+上传动作指：`git push`、`git merge`、`gh pr create`、`gh pr merge`、`gh api` 的写操作。
 
-上传动作指：`git push`、`git merge`、`gh pr create`、`gh pr merge`、`gh api` 的写操作。`git send-pack`、`git subtree push`、`git lfs push` 也算推送。
+### 防什么、不防什么
 
-**第一步：这条命令里有没有可能出现上传动作。** 对所有角色一样。
+- 负责人的上传关不靠拆命令，刻意构造的写法也拦。判断「是不是可能上传」只看命令原文里有没有 `push`、`merge`、`send-pack`、`pr create` 这些词；有，整条命令就必须通过一个按字符的严格检查，只能是一条最简单的上传命令。前几轮的教训是：守卫去拆 `$( )`、引号、heredoc，总有和真 shell 对不上的地方，对不上一处，后面的命令就被藏起来了。所以负责人这边干脆不拆。
+- 子代理和对接窗口的禁推防的是手误：它们本来就能改文件、能跑任何程序，写个脚本、用 `python3 -c`、设个别名都能把提交推上去，守卫挡不住。这一关靠拆命令来认上传动作，常见写法和很多冷门写法都认得出（`tests/test_shell_diff.py` 拿真的 bash / zsh 对照过），但不保证拆得和真 shell 完全一样。真正的关口是负责人这边：子代理推不上去的东西，最后都要经过负责人的合并和推送。
+- 两边都不防的见「已知限制」。
 
-- 把命令按 `;` `&&` `||` `|` `&`、换行、括号拆成一段段。`$( )`、反引号、`bash` / `sh` / `zsh -c "..."`、`eval "..."`、`trap "..."`、`alias 名字="..."`、喂给 shell 的 heredoc 和 `<<<`、没加引号的 heredoc 正文里的 `$( )`，里面的命令也拆开查。拆法照着真的 bash 和 zsh 核对过：`((命令); x)` 不是算术、算术里套的 `$( )`、反引号里再套反引号、`$'...'` 里的转义、zsh 的 `{命令}` 和 `=git`、`${ }` 里的 `#` 和 `<<`、双引号里的续行都按真 shell 的规矩来。命令替换 `$( )` 的收尾找错一个字，后面的引号就全配反了，所以里面拿不准的写法（`case` 语句、带括号或引号的注释、不在最外层或结束符不寻常的 `<<`）直接按看不懂算。heredoc 后面那几行，只要真 shell 有可能不当正文而当命令执行，就两种都算：括号里开的（zsh 里 `$(cat <<EOF)` 后面几行会被执行）、结束符长得不像结束符的、前面有没配对的 `[` 的（数组下标里的移位）、一直没等到结束符的。
-- 一段命令里，`git` 或 `gh`（不分大小写）不管出现在第几个词，后面跟着上传的子命令就算。所以不靠包装器名单：`env git push`、`timeout 30 git push`、`rtk proxy git push`、没见过的包装器都认得出。也不去记 git、gh、shell 的哪些选项带值：选项后面那个词可能是选项的值，也可能就是子命令（或脚本），两种都算。所以 `git --没见过的选项 值 push`、`gh pr -R o/r create`、`bash -euo pipefail -c '...'` 都认得出。`gh pr new`（create 的别名）、`gh repo create --push` 也算。代价是 `echo git push`、`git -C push status` 也算；`grep "git push" f` 这种加了引号的不算。
-- `gh api` 只有明显只读的才放：没指定方法或 `-X GET`，加上 `--jq`、`-H`、`--paginate` 这类只影响输出的选项。带 `-f` / `-F` 而没明说 GET、别的方法、`graphql`、认不出的选项，都按写算。
-- 看不懂的结构，加上命令文字里出现 `push`、`merge`、`send-pack`、`pr create` 这些词，按「有」算。看不懂的结构是：拆不开（引号括号没闭合、套得太深）；命令名是变量、命令替换、通配符或花括号展开（`$GIT push`、`{git,push}`）；shell 或 `source` 从标准输入读命令而守卫看不到内容（`... | bash`、`... | source /dev/stdin`；同一条命令里别处挂着的 heredoc 会当成可能喂给它的命令来查）；git / gh 的子命令由 `xargs`、`find -exec` 拼出来（`xargs git`、`xargs -I% git %`）。
-- `git` 的子命令是变量（`git $x`）或带着临时别名（`git -c alias.p=push p`）时，不管有没有这些词都算。
+### 负责人的上传关
 
-有上传动作时，子代理和对接窗口直接拦；负责人走第二步。
+**第一步：只看命令原文。** 原文里，或者去掉引号和反斜杠之后的原文里（`pu''sh`、`pu\sh`、`$'pu\x73h'`），能找到 `push`、`merge`、`send-pack`、`pr create`，就算可能上传。拆命令的结果只用来多拦几种原文里没有这些词的写法（`gh api` 的写操作、`git $x`），从不用来放行。
 
-**第二步：负责人的上传命令只认最简单的写法。** 一条命令 = 一个上传动作，其余一律拦。
+**第二步：按字符的严格检查。** 不拆任何嵌套，整条命令只能是「一条最简单的命令」：
 
-- 上传命令要单独一条。整条命令只能是下面三种之一，前面最多加 `rtk` / `rtk proxy`，后面最多加 `2>&1`、`>/dev/null` 这类重定向：
-  - `git [-C <路径>] merge ...`
-  - `git [-C <路径>] push ...`
-  - `gh pr create ...`
+- 单引号里什么字都行（PR 正文可以换行）。
+- 双引号里不能有 `$`、反引号、反斜杠、`!`。
+- 引号外面只能是普通的字和空格。`$` `` ` `` `;` `&` `|` `(` `)` `<` `>` `\` `#` `{` `}` `*` `?` `[` `]`、换行都不行，词的开头也不能是 `=`。所以 `cd x && git push`、`git push | tail`、`git push 2>&1`、`git push origin $BRANCH`、`--body "$(cat <<EOF ...)"` 都拦，提示「上传命令请单独运行，写成最简单的形式」。
 
-  和 `cd`、`pushd`、`popd`、子 shell、别的命令、管道、`&&`、变量、命令替换、通配符、`env` 等包装器、`VAR=值`（包括 `GIT_DIR=`、`GIT_WORK_TREE=`）、`git --git-dir` / `--work-tree` / `-c` 写在一起的都拦，提示「上传命令请单独运行」。合并说明、PR 标题和正文可以随便写，但要直接写在引号里：单引号里什么字都行，双引号里不能有 `$` 和反引号（shell 会展开），`$(cat <<EOF ...)` 也不行。这样守卫不用猜目录，也不用猜前一条命令把仓库改成了什么样：仓库就是钩子给的当前目录，或者 `-C` 指的那个目录。
-- `git merge`：只认 `git merge [--no-ff] [--ff-only] [--no-edit] <一个分支> [-m <说明>]`，以及 `git merge --abort` / `--quit`（直接放行）。`--continue`、`-s`、`-X`、`--squash`、`--no-commit`、一次合并几个分支、分支名带 `~` `^` 的、`FETCH_HEAD` 这类特殊名字都拦。要合并的提交 = `HEAD..<分支>`。
-- `git push`：只认 `git push`、`git push <远端>`、`git push <远端> <分支>`、`git push <远端> <本地分支>:<远端分支>`，可以加 `-u`。
+通过了这个检查，shell 不会再对命令做任何展开，里面也不可能再藏着第二条命令：守卫看到的词就是 git 拿到的参数。
+
+**第三步：只认这几种上传写法**，前面最多加 `rtk` / `rtk proxy`：
+
+- `git [-C <路径>] merge ...`：只认 `git merge [--no-ff] [--ff-only] [--no-edit] <一个分支> [-m <说明>]`，以及 `git merge --abort` / `--quit`（直接放行）。`--continue`、`-s`、`-X`、`--squash`、`--no-commit`、一次合并几个分支、分支名带 `~` `^` 的、`FETCH_HEAD` 这类特殊名字都拦。要合并的提交 = `HEAD..<分支>`。
+- `git [-C <路径>] push ...`：只认 `git push`、`git push <远端>`、`git push <远端> <分支>`、`git push <远端> <本地分支>:<远端分支>`，可以加 `-u`。
   - 远端必须是仓库里配置好的远端名，不能是网址或路径。要推的必须是本地分支或 `HEAD`。
-  - `:`、`:<分支>`、`+`、通配符、几个分支一起推、`--all`、`--mirror`、`--tags`、`--branches`、`--delete`、推标签，一律拦。远端分支名以 `heads/`、`tags/`、`remotes/`、`refs/` 开头的也拦（`feat:heads/main` 其实就是推到 main）。
+  - `:`、`:<分支>`、`+`、几个分支一起推、`--all`、`--mirror`、`--tags`、`--branches`、`--delete`、推标签，一律拦。远端分支名以 `heads/`、`tags/`、`remotes/`、`refs/` 开头的也拦（`feat:heads/main` 其实就是推到 main）。
   - `--force`、`--force-with-lease`、`-f` 一律拦，负责人不强推。
   - 不带分支的写法，要求当前分支的上游就是同名的远端分支，否则拦，提示改用 `git push -u <远端> <分支>`。
   - 没写明「本地:远端」时，推什么、推到哪要看仓库配置。仓库配置了 `push.default`（`simple`、`current` 以外的值）、`remote.<名>.push`、`remote.<名>.mirror`、`pushRemote`、`remote.pushDefault` 时拦，提示改用两边都写明的写法。
   - 要上传的提交 = 「远端的那个分支..要推的分支」。远端还没有这个分支时，从远端的主分支（远端的 HEAD、main、master）算起。
-- `gh pr create`：只认 `--head`、`--base`、`--title`、`--body`、`--fill`、`--draft` 这类选项；`-R` / `--repo`、`--web`、多余的参数都拦。查的是本地的 head 分支（不写就是当前分支），要上传的提交 = 「远端的 base 分支..head 分支」。
+- `gh pr create ...`：只认 `--head`、`--base`、`--title`、`--body`、`--fill`、`--draft` 这类选项；`-R` / `--repo`、`--web`、多余的参数都拦。查的是本地的 head 分支（不写就是当前分支），要上传的提交 = 「远端的 base 分支..head 分支」。
 - `gh pr merge` 和 `gh api` 的写操作：负责人一律拦，守卫查不出会上传什么。全自动用 `git merge` 再 `git push`。
+- 带着这些词、但确定不是上传的三种放行（同样要先通过第二步的检查）：git 的只读子命令（`git merge-base`、`git log --merges`、`git branch --merged`、`git worktree add -b feat/push-x ...`，子命令限 `log` `diff` `show` `status` `branch` `worktree` `merge-base` `rev-parse` `rev-list` `blame` `describe` `shortlog` `reflog` `revert` `ls-files` `for-each-ref` `show-ref` `tag`）；`gh pr view / list / checks / status / diff`；插件自己的脚本（`python3 <review.py 的路径> --branch feat/merge-x`，`verify.py` 的 `--cmd` 里带这些词的不算）。
+- 其余带着这些词的命令一律拦：`grep "git push" 文件`、`make push`、`./merge.sh`、`python3 -c "...push..."` 都在内。
 - 查不了就拦：不在 git 仓库里、仓库没有远端却要推送、远端还没有任何分支（第一次推送，请用户自己推）、找不到分支、git 出错。
 - 上面都过了，再按「审核记录」的查法查要上传的提交。有没审核的就拦，提示里给出要跑的审核命令。守卫自己不跑 Codex。
+
+### 子代理和对接窗口：靠拆命令认上传动作
+
+- 把命令按 `;` `&&` `||` `|` `&`、换行、括号拆成一段段。`$( )`、反引号、`bash` / `sh` / `zsh -c "..."`、`eval "..."`、`trap "..."`、`alias 名字="..."`、喂给 shell 的 heredoc 和 `<<<`、没加引号的 heredoc 正文里的 `$( )`，里面的命令也拆开查。
+- 一段命令里，`git` 或 `gh`（不分大小写）不管出现在第几个词，后面跟着上传的子命令就算。所以不靠包装器名单：`env git push`、`timeout 30 git push`、`rtk proxy git push`、没见过的包装器都认得出。也不去记 git、gh、shell 的哪些选项带值：选项后面那个词可能是选项的值，也可能就是子命令（或脚本），两种都算。`git send-pack`、`git subtree push`、`git lfs push`、`gh pr new`、`gh repo create --push` 也算。代价是 `echo git push`、`git -C push status` 也算；`grep "git push" f` 这种加了引号的不算。
+- `gh api` 只有明显只读的才放：没指定方法或 `-X GET`，加上 `--jq`、`-H`、`--paginate` 这类只影响输出的选项。带 `-f` / `-F` 而没明说 GET、别的方法、`graphql`、认不出的选项，都按写算。
+- 看不懂的结构，加上命令文字里出现 `push`、`merge`、`send-pack`、`pr create` 这些词，按「有」算。看不懂的结构是：拆不开（引号括号没闭合、套得太深）；命令名是变量、命令替换、通配符或花括号展开（`$GIT push`、`{git,push}`）；shell 或 `source` 从标准输入读命令而守卫看不到内容（`... | bash`）；git / gh 的子命令由 `xargs`、`find -exec` 拼出来；命令替换里拿不准的写法（`case` 语句、带括号或引号的注释、不寻常的 `<<`）。`git` 的子命令是变量（`git $x`）或带着临时别名（`git -c alias.p=push p`）时，不管有没有这些词都算。
+- 拆法照着真的 bash 和 zsh 核对过一批写法（嵌套双引号里的 `$( )`、`((命令); x)` 不是算术、反引号里再套反引号、`$'...'` 里的转义、zsh 的 `{命令}` 和 `=git`、括号里开的 heredoc 等）。这不等于拆得和真 shell 完全一样。
 
 ## 开关
 
@@ -186,39 +196,32 @@
 - `gh`（半自动开 PR、查 GitHub 上线状态用，可选）。
 - Notion 和 Slack 连接（看板和汇报用）。
 
-测试：`python3 -m unittest discover -s tests`。其中 `tests/test_shell_diff.py` 把一百多种写法交给真的 bash / zsh 跑（PATH 里放一个假的 git，只记下有没有被叫去上传），只要有一个 shell 真的执行了上传，守卫就必须认得出。
+测试：`python3 -m unittest discover -s tests`。其中 `tests/test_shell_diff.py` 把两百来种写法交给真的 bash / zsh 跑（PATH 里放一个假的 git，只记下有没有被叫去上传）：只要有一个 shell 真的执行了上传，拆命令那一套要认得出，负责人那边也不能放行。
 
 ## 已知限制
 
-- 守卫是护栏，不是安全边界。它挡的是负责人和子代理顺手绕过流程，挡不住存心绕过的。下面这些挡不住：
-  - 在别的程序里间接写文件或上传：`python3 -c "..."`、`node -e "..."`、`python3 脚本.py`、`bash 脚本.sh`、`source 脚本`（脚本文件的内容不查）、git 钩子、`make`。
-  - 把命令当字符串交给别的程序去跑：`watch '...'`、`su -c '...'`、`ssh 主机 '...'`。
-  - git 自己会去跑的命令：`git rebase --exec '...'`、git 钩子、`core.pager` 这类配置里写的命令。
-  - shell 里早就定义好的别名和函数（比如 oh-my-zsh 的 `gp` 就是 git push）。守卫只认 `git` 和 `gh` 这两个词。
-  - 别的上传方式（`hub`、`glab`、`git send-email`、`git svn dcommit` 等），和不走命令行的工具（比如 GitHub 的 MCP 工具）。gh 里只在远端之间挪提交的子命令（`gh repo sync`、`gh pr update-branch`）也不拦。
-  - 靠 shell 变量让 shell 自己去执行：`PS4='$(...)'; set -x`、`PROMPT_COMMAND`、bash 的 `${x@P}`。
-  - 命令名或子命令是变量、展开、编码拼出来的，命令文字里又没出现 `push` / `merge` 这些词：`a=pu; b=sh; $G $a$b`、`echo <base64> | base64 -d | bash`。
-  - git 和 gh 的别名：`git config alias.p push` 之后的 `git p`，`gh alias set` 之后的别名。
-  - 绕开 git 和 gh 直接调 GitHub 接口（`curl` 等）。
-  - zsh 特有的冷门写法（比如通配符限定符里执行代码）。守卫按 bash 和 zsh 共有的常见写法拆命令。
+- 守卫是护栏，不是安全边界。负责人的上传关拦的是「命令原文里带着上传字样」的一切写法；下面这些原文里没有这些词，或者根本不走命令行，两边都挡不住：
+  - 脚本文件、别的程序里间接上传，而命令原文里没有这些词：`bash deploy.sh`、`make release`、`python3 发版.py`。
+  - shell 里早就定义好的别名和函数（比如 oh-my-zsh 的 `gp` 就是 git push），git 和 gh 的别名（`git config alias.p ...` 之后的 `git p`）。
+  - 用变量、展开、编码拼出这些词：`a=pu; b=sh; git $a$b` 两边都拦（`git` 的子命令是变量）；`$G $a$b`、`echo <base64> | base64 -d | bash` 拦不住。
+  - 绕开 git 和 gh 的上传方式：`curl` 调 GitHub 接口、`hub`、`glab`、`git send-email`、不走命令行的工具（比如 GitHub 的 MCP 工具）。
+  - git 自己会去跑的命令：git 钩子、`core.pager` 这类配置里写的命令。
   - 审核记录和远端跟踪分支都在本地的 `.git` 里，能在仓库里跑命令的人都能改：直接写 `reviewed.jsonl`、用假的审核命令跑 review.py（`AGENT_DEV_TEAM_CODEX_CMD`）、`git update-ref refs/remotes/origin/main ...`。
   - 守卫在命令运行前检查。检查之后、真正上传之前，别的窗口挪了分支，守卫看不到。
   - 合并关只认 `git merge`。`git pull <远端> <分支>`、`git branch -f`、`git update-ref` 这类把提交挪进主分支的不拦。有远端时推送照样查；没有远端的本地仓库就没有第二道关。
   - 负责人的黑名单只拦列出来的命令。
-- 上传关是保守判断，下面这些会被误拦，改个写法就行：
-  - 把 git push 当普通词的命令：`echo git push`、`man git push`。加引号就不算。目录或文件正好叫 push / merge 的：`git -C push status`。
-  - 负责人把上传命令和别的东西写在一起：`cd x && git push`、`git push | tail`、`git merge x && git push`。分开单独运行。
-  - 负责人用 `gh pr create --body "$(cat <<'EOF' ...)"` 写 PR 正文。正文直接写在引号里。
-  - 变量当命令名，同一条命令里又出现 `push` / `merge` 这些词：`$PYTHON tests/test_merge.py`。
-  - `gh api` 用 POST 做的读操作（比如 graphql 查询），和路径里带变量、没加引号的 `?` 的读操作。
-  - shell 没给明确的脚本文件、同一条命令里又出现 `push` / `merge` 这些词：`bash -x deploy-merge`、`curl ... | bash` 加上别处有这些词。
-  - 命令替换里用了 `case` 语句、带括号的注释，或者括号里开的 heredoc 正文里有 `git push` 这样的话，同一条命令里又出现这些词。
-  - 负责人强推、删远端分支、推标签、第一次推送到空的远端：这些请用户自己做，或者用户先说「普通对话」。
+- 子代理和对接窗口的禁推只防手误。除了上面这些，带着上传字样的刻意写法它也可能认不出：`python3 -c "...git push..."`、`watch 'git push'`、`su -c`、`ssh 主机 '...'`、`git rebase --exec`、`PS4='$(...)'; set -x`、zsh 特有的冷门写法，以及任何守卫拆得和真 shell 不一样的写法。同样的命令到了负责人那边会被拦。
+- 负责人的上传关是保守判断，下面这些会被误拦：
+  - 带着 `push` / `merge` 这些词、又不在放行名单里的只读命令：`grep -rn merge src`、`cat docs/push.md`、`git fetch origin feat/merge-x`、`git log --merges | head`。换个写法，或者派给子代理。分支名、文件名最好别带这些词。
+  - 上传命令和别的东西写在一起：`cd x && git push`、`git push | tail`、`git push 2>&1`、`git merge x && git push`。分开单独运行，不加重定向。
+  - 合并说明、PR 标题和正文里有 `$`、反引号、反斜杠、`!` 而用了双引号，或者用了 `$(cat <<'EOF' ...)`。写在单引号里；正文里要有单引号的话，用 `--body-file` 先让子代理把正文写成文件。
+  - 强推、删远端分支、推标签、第一次推送到空的远端：这些请用户自己做，或者用户先说「普通对话」。
+- 子代理和对接窗口这边的误拦：`echo git push` 这种把 git push 当普通词的（加引号就不算）；变量当命令名、shell 从标准输入读命令、命令替换里有 `case` 语句，同一条命令里又出现这些词；`gh api` 用 POST 做的读操作。
 - 审核看的是一段提交的最终结果。中间提交的内容（比如加了又删掉的文件）会跟着历史一起上传，Codex 不一定看过。
 - `gh pr create` 查的是本地的 head 分支，不是远端上那个分支的实际内容。
 - 审核员是模型。被审的改动里可以写话去骗它，review.py 只管认整行的结论，管不了 Codex 自己被说服；Codex 在结论后面又原样引用了一行 `VERDICT: PASS` 的话，也会被当成通过。
 - 回滚提交不经 Codex 审核就记进审核记录。rollback.py 只保证撤回的是当前分支历史里的提交；撤回哪些由负责人定，撤回一个修复也会把原来的问题带回来。
-- 和最初的规格不一样的地方：通过记录从「一行一个提交号」改成了审核单元；上传关从「查不了就放行」改成了「看不懂就拦」（第一次推送、不在仓库里都拦）；负责人不能强推、不能用 `gh pr merge`；夹带改动的合并提交要审；黑名单多拦了包装器（`sudo` `env` `timeout` 等）后面的命令和 `bash -c`、`eval`、喂给 shell 的 heredoc 里的命令，多放了重定向到 `/dev/stdout`、`/dev/stderr`、`/dev/tty`。
+- 和最初的规格不一样的地方：通过记录从「一行一个提交号」改成了审核单元；负责人的上传关从「拆命令、查不了就放行」改成了「只看原文、按字符检查、看不懂就拦」（第一次推送、不在仓库里都拦）；负责人不能强推、不能用 `gh pr merge`；夹带改动的合并提交要审；黑名单多拦了包装器（`sudo` `env` `timeout` 等）后面的命令和 `bash -c`、`eval`、喂给 shell 的 heredoc 里的命令，多放了重定向到 `/dev/stdout`、`/dev/stderr`、`/dev/tty`。
 - 新对话默认是负责人模式，对所有文件夹都生效，不只是 git 项目。不想要时说「普通对话」，或用「开关」关掉。
 - 普通对话里开的后台子代理不受守卫限制（规格里没有这条，是后加的）。
 - `rollback.py --push` 在脚本里直接推送，不经过守卫的半自动限制，半自动模式下也会直接推主分支（审核记录和推送的写法照样查）。

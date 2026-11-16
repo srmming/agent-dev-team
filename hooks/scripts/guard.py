@@ -2,12 +2,14 @@
 """agent-dev-team 守卫（PreToolUse：Edit|Write|MultiEdit|NotebookEdit|Bash）。
 
 - none（守卫关了）、normal（普通对话）：全部放行。
-- subagent（子代理）、kuaixiu（对接窗口）：命令里可能有上传动作就拦。
+- subagent（子代理）、kuaixiu（对接窗口）：命令里可能有上传动作就拦。靠拆命令来认，防的是手误，
+  不防刻意构造的绕过。
 - lead（负责人）：
   1. 不能用编辑工具改项目根目录里的文件；
   2. 命令行只拦「写」的动作（黑名单），其余放行；
-  3. 上传关，看不懂就拦：上传命令要单独一条、写成最简单的形式；要上传的提交必须能由完整的
-     审核单元拼出来（见 records.py）。守卫自己不跑 Codex；
+  3. 上传关不靠拆命令：命令原文里出现 push / merge 这类词，整条命令就必须是一条最简单的上传命令
+     （按字符检查，不认任何嵌套），要上传的提交必须能由审核单元一环扣一环接出来（见 records.py）。
+     守卫自己不跑 Codex；
   4. 半自动：不直接合并进主分支、不直接推主分支、不用 gh 合并 PR。
 
 上传动作 = git push / git merge / gh pr create / gh pr merge / gh api 的写操作。
@@ -103,15 +105,28 @@ def _heredoc_body(s, i, delim, strip_tabs, joined=False):
 
 
 def _skip_quoted(s, i):
-    """s[i] 是 ' 或 " 或 $' 的开头。返回引号结束之后的位置；没闭合返回 None。"""
+    """s[i] 是 ' 或 " 或 $' 的开头。返回引号结束之后的位置；没闭合返回 None。
+    双引号里的 $( ) 和反引号要整段跳过：里面还可以再有双引号（"$(echo "$(echo "(")")"），
+    不能见到下一个 " 就当成结束。"""
     n = len(s)
     if s[i] == "'":
         j = s.find("'", i + 1)
         return None if j < 0 else j + 1
-    j = i + (2 if s[i] == "$" else 1)
-    end = s[j - 1]
-    while j < n and s[j] != end:
-        j += 2 if s[j] == "\\" else 1
+    if s[i] == "$":  # $'...'
+        j = i + 2
+        while j < n and s[j] != "'":
+            j += 2 if s[j] == "\\" else 1
+        return None if j >= n else j + 1
+    j = i + 1
+    while j < n and s[j] != '"':
+        if s[j] == "\\":
+            j += 2
+        elif s.startswith("$(", j):
+            j = _comsub_end(s, j) + 1
+        elif s[j] == "`":
+            j = _close_backtick(s, j) + 1
+        else:
+            j += 1
     return None if j >= n else j + 1
 
 
@@ -762,7 +777,7 @@ def check_lead_bash(cmd):
     return None
 
 
-# ---------- 上传动作：第一步，只判断「有没有可能上传」 ----------
+# ---------- 上传动作：靠拆命令来认（子代理、对接窗口用；对负责人只用来多拦） ----------
 
 # 命令拆不开、或有看不懂的结构时，命令文字里出现这些词就按「有上传动作」算
 SHIP_HINT = re.compile(r"push|merge|send-pack|\bpr\s+create")
@@ -914,7 +929,7 @@ def may_ship(cmd):
     return bool(kinds) or unknown
 
 
-# ---------- 上传动作：第二步，负责人的上传关（只认最简单的写法，其余一律拦） ----------
+# ---------- 负责人的上传关：不靠拆命令，只认最简单的写法，其余一律拦 ----------
 
 REF_RE = re.compile(r"^[\w./@-]+$")
 MERGE_FLAGS = {"--no-ff", "--ff", "--ff-only", "--no-edit", "-q", "--quiet", "--stat", "--no-stat"}
@@ -927,14 +942,12 @@ GH_PR_FLAGS = {"-d", "--draft", "--dry-run", "-f", "--fill", "--fill-first", "--
                "--no-maintainer-edit"}
 GH_PR_SHORT = {"-H": "--head", "-B": "--base"}
 
-UNKNOWN = ("守卫看不懂这条命令（命令名是变量或展开、命令从标准输入喂给 shell、引号括号没闭合等），"
-           "而命令里又出现了 push / merge 这类词，不能放行。把命令写直白些；"
-           "要上传就单独运行最简单的写法，比如 `git push origin <分支>`。")
-STANDALONE = ("上传命令（合并 / 推送 / 开 PR）请单独运行，不要和 cd、别的命令、管道、变量、包装器写在一起。"
-              "守卫只认这几种写法：`git merge <分支>`、`git push`、`git push <远端> <分支>`、"
-              "`gh pr create --head <分支>`；要指定仓库就在 git 后面加 `-C <路径>`。"
-              "合并说明、PR 标题和正文直接写在引号里（可以换行；有 $ 或反引号就用单引号），"
-              "不要用 $(cat <<EOF ...) 和变量。")
+UPLOAD_FORM = ("命令里出现了 push / merge 这类词。上传命令（合并 / 推送 / 开 PR）请单独运行，写成最简单的形式："
+               "`git merge <分支>`、`git push`、`git push <远端> <分支>`、"
+               "`gh pr create --head <分支> --title '…' --body '…'`；要指定仓库就在 git 后面加 `-C <路径>`。"
+               "不要和 cd、别的命令、管道、重定向、变量、$( ) 写在一起。合并说明、PR 标题和正文写在单引号里"
+               "（可以换行）；双引号里不能有 $、反引号、反斜杠和 !。"
+               "不是上传（只是搜索这些词，或者分支名、文件名里带这些词）：换个不含这些词的写法，或者派给子代理。")
 MERGE_HELP = "守卫只认 `git merge [--no-ff] [--no-edit] <分支> [-m <说明>]` 和 `git merge --abort`。"
 PUSH_HELP = ("守卫只认这几种写法：`git push`、`git push <远端>`、`git push <远端> <分支>`、"
              "`git push <远端> <本地分支>:<远端分支>`，前面可以加 -u。")
@@ -988,30 +1001,67 @@ def default_branch(cwd):
     return None
 
 
-def simple_upload(cmd):
-    """整条命令是不是单独一条、写法最简单的上传命令：
-    [rtk [proxy]] git [-C <路径>] merge|push <参数>，或 [rtk [proxy]] gh pr create <参数>。
-    是就返回 (种类, 参数, -C 的路径或 None)，不是返回 None。
-    这样守卫不用去猜 cd、子 shell、环境变量、前一条命令会把仓库变成什么样：目录就是钩子给的 cwd。"""
-    try:
-        toks = tokenize(cmd.strip())
-    except ValueError:
-        return None
-    words, i = [], 0
-    while i < len(toks):
-        kind, text = toks[i]
-        if kind == "w":
-            words.append(text)
-            i += 1
-        elif (kind == "o" and (text in WRITE_OPS or text in ("<", "<&"))
-              and i + 1 < len(toks) and toks[i + 1][0] == "w"):
-            i += 2  # 重定向（2>&1、>/dev/null）不影响上传什么；写到哪里由黑名单管
+BARE_BAD = set("$`;&|()<>\\#{}*?[]")  # 引号外面不能出现的字：出现了就可能不止一条命令，或者词还会被展开
+DQ_BAD = set("$`\\!")  # 双引号里不能出现的字
+# 一条最简单的 git 命令，子命令是这些的肯定不是上传（git merge-base、git log --merges、分支名里带 push）
+GIT_READ = {"log", "diff", "show", "status", "branch", "worktree", "merge-base", "rev-parse", "rev-list", "blame",
+            "describe", "shortlog", "reflog", "revert", "ls-files", "for-each-ref", "show-ref", "tag"}
+GH_PR_READ = {"view", "list", "checks", "status", "diff"}  # gh pr view 12 --json mergeable
+OWN_SCRIPTS = {"review.py", "verify.py", "deploy_check.py", "rollback.py", "mode.py"}
+
+
+def hinted(cmd):
+    """命令原文里有没有 push / merge 这类词。原文找一遍；去掉引号和反斜杠（pu''sh、pu\\sh）再找一遍；
+    把 $'...' 里的转义还原（$'pu\\x73h'）再找一遍。只看文字，不拆命令。"""
+    flat = r"""\\\n|['"\\]"""
+    return bool(SHIP_HINT.search(cmd) or SHIP_HINT.search(re.sub(flat, "", cmd))
+                or SHIP_HINT.search(re.sub(flat, "", _ansi_c(cmd))))
+
+
+def strict_words(cmd):
+    """按字符扫一遍，不拆任何嵌套：整条命令是不是「一条最简单的命令」。是就返回词列表，不是返回 None。
+    - 单引号里：什么字都行（PR 正文可以换行）。
+    - 双引号里：不能有 $、反引号、反斜杠、!。
+    - 引号外面：只能是普通的字和空格。$ ` ; & | ( ) < > \\ # { } * ? [ ]、换行、别的控制字符都不行，
+      词的开头也不能是 =（zsh 里 =git 是 git 的完整路径）。
+    通过了，shell 就不会再对它做任何展开，也不可能再藏着第二条命令：守卫看到的词就是程序拿到的参数。"""
+    words, cur, quote = [], None, ""
+    for c in cmd.strip(" \t\n"):
+        if quote:
+            if c == quote:
+                quote = ""
+            elif quote == '"' and c in DQ_BAD:
+                return None
+            else:
+                cur.append(c)
+        elif c in "'\"":
+            quote, cur = c, [] if cur is None else cur
+        elif c in " \t":
+            if cur is not None:
+                words.append("".join(cur))
+                cur = None
+        elif c in BARE_BAD or ord(c) < 32 or ord(c) == 127 or (c == "=" and cur is None):
+            return None
         else:
-            return None  # ; && | & 括号、换行、$( )、heredoc：不是单独一条命令
-    if any(_dyn(w) for w in words):
+            cur = [] if cur is None else cur
+            cur.append(c)
+    if quote:
         return None
+    return words + ["".join(cur)] if cur is not None else words
+
+
+def no_rtk(words):
+    """去掉前面的 rtk / rtk proxy（省字数的代理，后面才是真正的命令）。"""
     if words[:1] == ["rtk"]:
-        words = words[2:] if words[1:2] == ["proxy"] else words[1:]
+        return words[2:] if words[1:2] == ["proxy"] else words[1:]
+    return words
+
+
+def upload_form(words):
+    """一条最简单的命令（strict_words 给的词）是不是守卫认的上传写法：
+    [rtk [proxy]] git [-C <路径>] merge|push <参数>，或 [rtk [proxy]] gh pr create <参数>。
+    是就返回 (种类, 参数, -C 的路径或 None)，不是返回 None。目录就是钩子给的 cwd，或者 -C 指的那个。"""
+    words = no_rtk(words)
     if words[:1] == ["git"]:
         rest, cdir = words[1:], None
         if rest[:1] == ["-C"] and len(rest) > 1:
@@ -1021,6 +1071,31 @@ def simple_upload(cmd):
     elif words[:3] == ["gh", "pr", "create"]:
         return "pr-create", words[3:], None
     return None
+
+
+def simple_upload(cmd):
+    """整条命令是不是单独一条、写法最简单的上传命令。是就返回 (种类, 参数, -C 的路径或 None)，不是返回 None。"""
+    words = strict_words(cmd)
+    return upload_form(words) if words else None
+
+
+def harmless(cwd, words):
+    """一条最简单的命令里带着 push / merge 这类词，但确定不是上传的三种：
+    git 的只读子命令（git merge-base、git log --merges、git worktree add -b feat/push-x）；
+    gh pr 的只读子命令（gh pr view 12 --json mergeable）；
+    插件自己的脚本（python3 <review.py 的路径> --branch feat/merge-x），verify.py 的 --cmd 里带这些词的不算。"""
+    words = no_rtk(words)
+    if words[:1] == ["git"]:
+        rest = words[3:] if words[1:2] == ["-C"] else words[1:]
+        return rest[:1] != [] and rest[0] in GIT_READ
+    if words[:2] == ["gh", "pr"]:
+        return words[2:3] != [] and words[2] in GH_PR_READ
+    if words[:1] == ["python3"] and len(words) > 1:
+        script = os.path.realpath(os.path.join(cwd, words[1]))
+        own = os.path.dirname(script) == os.path.dirname(os.path.realpath(__file__))
+        cmds = [w for k, w in enumerate(words) if w.startswith("--cmd=") or (k and words[k - 1] == "--cmd")]
+        return own and os.path.basename(script) in OWN_SCRIPTS and not any(SHIP_HINT.search(c) for c in cmds)
+    return False
 
 
 def merge_plan(cwd, args):
@@ -1234,19 +1309,26 @@ def review_msg(cwd, plan, missing):
 
 
 def check_upload(cwd, cmd, kinds, semi, codex_off):
-    """负责人的一条上传命令能不能放行。返回拦截原因或 None。"""
-    if not kinds:
-        return UNKNOWN
-    if kinds & {"pr-merge", "api"}:
+    """负责人的一条可能是上传的命令能不能放行。返回拦截原因或 None。
+    放不放行只看 strict_words 给出的词；kinds（拆命令认出来的）只用来多拦、给出更明确的说法。"""
+    if semi and kinds & {"pr-merge", "api"}:
+        return SEMI_PR
+    words = strict_words(cmd)
+    if words is None:
+        return UPLOAD_FORM
+    kind = gh_ship(no_rtk(words)) if no_rtk(words)[:1] == ["gh"] else None
+    if kind in ("pr-merge", "api") or kinds & {"pr-merge", "api"}:
         if semi:
             return SEMI_PR
-        if "pr-merge" in kinds:
+        if kind == "pr-merge" or "pr-merge" in kinds:
             return ("守卫查不出 PR 里有哪些提交，负责人不用 gh pr merge。"
                     "全自动：在主分支上 git merge <分支>，再 git push。")
         return "守卫看不懂 gh api 的写操作会改远端的什么，不能放行。上传改用 git push，开 PR 用 gh pr create。"
-    up = simple_upload(cmd)
+    if harmless(cwd, words) and not kinds:
+        return None
+    up = upload_form(words)
     if not up:
-        return STANDALONE
+        return UPLOAD_FORM
     kind, args, cdir = up
     if cdir:
         cwd = os.path.abspath(os.path.join(cwd, os.path.expanduser(cdir)))
@@ -1271,9 +1353,12 @@ def check_upload(cwd, cmd, kinds, semi, codex_off):
 
 
 def check_ship(cwd, cmd, auto):
-    """负责人的上传关和半自动限制。返回拦截原因或 None。"""
+    """负责人的上传关和半自动限制。返回拦截原因或 None。
+    是不是「可能上传」只看命令原文里有没有 push / merge 这类词，不靠拆命令：拆命令和真 shell
+    对不上的地方没有尽头。拆命令的结果（scan_ship）只用来多拦一些原文里没有这些词的写法
+    （gh api 的写操作、git $x），从不用来放行。"""
     kinds, unknown = scan_ship(cmd)
-    if not kinds and not unknown:
+    if not (hinted(cmd) or kinds or unknown):
         return None  # 不是上传命令
     semi = auto == "semi"
     codex_off = os.environ.get("AGENT_DEV_TEAM_CODEX", "").lower() == "off"
@@ -1314,22 +1399,23 @@ NO_SHIP = {
     "kuaixiu": "对接窗口不能 push / 合并 / 开 PR。提交到当前分支后交回负责人，由负责人验收、过 Codex 审核再合并。"
                "要跟上主分支，用 git rebase。",
 }
-NO_SHIP_HINT = ("\n（守卫是保守判断的：命令里只要可能有上传动作就拦，包括 `echo git push` 这种、"
-                "变量当命令名、拆不开的命令里出现 push / merge。确实不是上传，就把命令写直白些再试。）")
+NO_SHIP_HINT = ("\n（子代理和对接窗口这边是靠拆命令来认上传动作的，判断偏保守：`echo git push` 这种、变量当命令名、"
+                "拆不开的命令里出现 push / merge 都会拦。确实不是上传，就把命令写直白些再试。）")
 
 
 # 秒。钩子自己的超时是 30 秒，超时会被当成放行，所以守卫要赶在它前面自己收尾。
 # 环境变量 AGENT_DEV_TEAM_GUARD_TIMEOUT 只能把它调小（测试用）。
 TIME_LIMIT = 20
-TIMEOUT_HINT = re.compile(SHIP_HINT.pattern + r"|\bgh\b")  # 超时的时候没法细看，gh 的命令也算
-WATCH = {}  # 正在检查的命令，超时的时候用
+WATCH = {}  # 正在检查的命令。一读到钩子输入就登记：认角色的时候（要跑 git）超时了也用得上
 
 
 def on_timeout(signum, frame):
-    """守卫跑得太久：正在查的命令可能是上传命令就拦，其余放行。"""
-    if TIMEOUT_HINT.search(WATCH.get("cmd", "")):
-        print(PREFIX + "守卫检查这条命令超时了，而命令里出现了 push / merge 这类词，不能放行。"
-              "把上传命令单独写成最简单的形式再试。", file=sys.stderr)
+    """守卫跑得太久：正在查的命令可能是上传命令就拦，其余放行。这时可能连角色都还没认出来，一样拦。"""
+    cmd = WATCH.get("cmd", "")
+    if hinted(cmd) or re.search(r"\bgh\b", cmd):
+        print(PREFIX + "守卫检查这条命令超时了（多半是 git 太慢），而命令里出现了 push / merge 这类词或者 gh，"
+              "不能放行。稍后再试；上传命令单独写成最简单的形式。这个对话不归守卫管的话，"
+              "可以用环境变量 AGENT_DEV_TEAM=off 关掉守卫。", file=sys.stderr)
         os._exit(2)
     os._exit(0)
 
@@ -1339,8 +1425,12 @@ def main():
         data = json.load(sys.stdin)
     except Exception:
         sys.exit(0)
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or os.environ.get("AGENT_DEV_TEAM", "").lower() == "off":
         sys.exit(0)
+    inp = data.get("tool_input")
+    cmd = inp.get("command") if isinstance(inp, dict) else None
+    if data.get("tool_name") == "Bash" and isinstance(cmd, str):
+        WATCH["cmd"] = cmd  # 在认角色之前登记
     if hasattr(signal, "SIGALRM"):
         try:
             limit = min(float(os.environ.get("AGENT_DEV_TEAM_GUARD_TIMEOUT") or TIME_LIMIT), TIME_LIMIT)
@@ -1359,7 +1449,6 @@ def main():
         cmd = inp.get("command", "") or ""
         if not isinstance(cmd, str):
             sys.exit(0)
-        WATCH["cmd"] = cmd
         if r in NO_SHIP:
             if may_ship(cmd):
                 block(NO_SHIP[r] + NO_SHIP_HINT)

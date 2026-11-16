@@ -16,7 +16,10 @@ from unittest import mock
 SCRIPTS = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "hooks", "scripts"))
 sys.path.insert(0, SCRIPTS)
 import records  # noqa: E402
-from guard import check_lead_bash, may_ship  # noqa: E402
+from guard import check_lead_bash, hinted, may_ship, strict_words  # noqa: E402
+
+# Codex 第 3 轮的复现：嵌套双引号里的 $( )，以前配错括号，把后面的 git push 藏进了引号
+NESTED_QUOTES = '''echo "$(echo "$(echo "(")")"; git push; echo ")"'''
 
 PREFIX = "【Agent 开发团队 拦截】"
 
@@ -528,6 +531,10 @@ class ShipWords(unittest.TestCase):
             "echo 'git push' | source /dev/stdin",
             "cat <<EOF\nx\nE\\\nOF\ngit push\nEOF",  # 没加引号的 heredoc：行尾反斜杠拼出结束符
             'echo "$(true # )\ngit push\n)"',       # 注释里的 ) 不是命令替换的收尾
+            NESTED_QUOTES,                          # 嵌套双引号里的 $( )
+            'echo "$(echo "a b" "$(echo ")")")"; git push',
+            'echo "`echo "("`"; git push; echo ")"',
+            'x="$(echo "$(echo "$(echo "(")")")"; git merge feat',
             "cat <((git push))",                    # 进程替换里套子 shell，不是算术
             "cat <((env git push)) 2>&1 | cat",
             "cat <<EOF\n$(case x in x) env git push;; esac)\nEOF",       # case 的模式后面的 ) 不是命令替换的收尾
@@ -604,6 +611,40 @@ class ShipWords(unittest.TestCase):
             "which git",
             "ls | xargs git",
         )
+
+
+class StrictWords(unittest.TestCase):
+    """负责人的上传关用的按字符检查：不拆任何嵌套，只认一条最简单的命令。"""
+
+    def test_通过的写法_返回的词就是程序拿到的参数(self):
+        for cmd, words in (
+                ("git push", ["git", "push"]),
+                ("  git   push\torigin  main \n", ["git", "push", "origin", "main"]),
+                ("git merge feat -m 'a b; c | d $x `y` \\ \n换行'", ["git", "merge", "feat", "-m", "a b; c | d $x `y` \\ \n换行"]),
+                ('gh pr create --title "what? [WIP] {a,b} *; #1" --body \'\'', ["gh", "pr", "create", "--title", "what? [WIP] {a,b} *; #1", "--body", ""]),
+                ("git merge --message='x y' fe'a't", ["git", "merge", "--message=x y", "feat"]),
+                ("git -C ~/proj push origin feat/x-1.2_y@z", ["git", "-C", "~/proj", "push", "origin", "feat/x-1.2_y@z"]),
+                ("git merge feat -m \"它说'好'\"", ["git", "merge", "feat", "-m", "它说'好'"]),
+                ("", []),
+        ):
+            self.assertEqual(strict_words(cmd), words, cmd)
+
+    def test_不通过的写法(self):
+        for cmd in ("git push; ls", "git push && ls", "git push | cat", "git push &", "(git push)", "git push > x", "git push < x",
+                    "git push 2>&1", "git push $x", "git push `x`", "git push $(x)", "git push\\ origin", "git push\nls",
+                    "git push # x", "{ git push; }", "git push {a,b}", "git merge fea*", "git merge fea?", "git merge fea[t]",
+                    "=git push", "git push =x", 'git merge x -m "$y"', 'git merge x -m "`y`"', 'git merge x -m "a\\"b"',
+                    'git merge x -m "a!"', "git merge x -m 'a", 'git merge x -m "a', "git merge x -m $'a'", "git push \x07",
+                    "git\rpush", NESTED_QUOTES):
+            self.assertIsNone(strict_words(cmd), cmd)
+
+    def test_原文里有没有这些词(self):
+        for cmd in ("git push", "git merge x", "git send-pack", "gh pr create", "gh pr   create", "git pu''sh", 'git p"us"h',
+                    "git pu\\sh", "git pu\\\nsh", "git $'pu\\x73h'", "git $'\\160ush'", "echo PUSHED > x; git merge-base a b",
+                    "g'h' p'r' cr'eate'", "./push.sh", "x=merge", NESTED_QUOTES):
+            self.assertTrue(hinted(cmd), cmd)
+        for cmd in ("git status", "git pull", "gh pr view 1", "git commit -m x", "ls", "gh pr\ncreate"[:5], "git PUSH"):
+            self.assertFalse(hinted(cmd), cmd)
 
 
 class GuardCase(unittest.TestCase):
@@ -799,7 +840,8 @@ class RolesTest(GuardCase):
         self.set_state(role="subagent")
         self.deny(repo, "git -c a=b push", "子代理不能 push")
         self.deny(repo, "git merge feat", "子代理不能 push")
-        self.deny(repo, "echo 'git push", "保守判断")  # 拆不开，又出现了 push
+        self.deny(repo, "echo 'git push", "判断偏保守")  # 拆不开，又出现了 push
+        self.deny(repo, NESTED_QUOTES, "子代理不能 push")
         self.allow(repo, 'grep "git push" f')
         self.allow(repo, "rm x")
         self.allow(repo, self.edits(repo)[0][1], tool="Edit")
@@ -807,7 +849,7 @@ class RolesTest(GuardCase):
     def test_kuaixiu_对接窗口_只拦上传(self):
         repo = self.unreviewed_repo()
         self.set_state(role="kuaixiu")
-        for cmd in self.SHIPS:
+        for cmd in self.SHIPS + [NESTED_QUOTES]:
             self.deny(repo, cmd, "对接窗口不能 push")
         for cmd in self.WRITES + ['grep "git push" f']:
             self.allow(repo, cmd)
@@ -824,10 +866,12 @@ class RolesTest(GuardCase):
             self.deny(repo, cmd, "子代理")
         self.deny(repo, "echo 'abc", "改写")
         for cmd in ["ls -la", "for f in a b; do cat $f; done", "sed -n 1,5p x", "awk '{print $1}' x", "python3 x.py",
-                    'grep "git push" x', "echo a 2>&1", "cmd > /dev/null", "git worktree add ../wt -b feat",
+                    "echo a 2>&1", "cmd > /dev/null", "git worktree add ../wt -b feat",
                     "git revert abc", "git merge --abort", "git pull", "git fetch origin", "git branch -D feat",
+                    "git log --oneline -5 | head", "git diff main...feat --stat", "git status --short",
                     "git log --grep merge", "$PYTHON -m unittest"]:
             self.allow(repo, cmd)
+        self.deny(repo, NESTED_QUOTES, "请单独运行")
 
     def test_lead_不能用编辑工具改项目里的文件(self):
         repo = self.make_repo()
@@ -1193,17 +1237,20 @@ class UploadGateTest(GuardCase):
         self.reviewed(self.repo, "feat")
         for cmd in ("git merge feat", "git merge --no-ff feat -m 'merge feat'", "git merge --no-ff --no-edit feat",
                     "git merge --ff-only -q feat", "git merge feat --message='合并 feat'", "rtk git merge feat",
-                    "rtk proxy git merge feat", "git merge feat 2>&1", "git merge feat > /dev/null 2>&1",
-                    "git merge -m '说明里有 --squash 和 ; 也没关系' feat",
-                    # 引号里的 ? * [ ] { } 是原样的字；单引号里的 $ 和反引号也是
-                    'git merge --no-ff feat -m "合并 feat：加了 foo? [v2] {a,b} *.py"',
-                    "git merge feat -m '修 `guard` 里 $x 的问题'",
-                    'git merge feat -m "第一行\n\n第二段 \\$5"'):
+                    "rtk proxy git merge feat", "  git merge feat  \n",
+                    "git merge -m '说明里有 --squash 和 ; | & $x `y` 也没关系' feat",
+                    # 双引号里的 ? * [ ] { } ; | 是原样的字
+                    'git merge --no-ff feat -m "合并 feat：加了 foo? [v2] {a,b} *.py; 还有 a|b"',
+                    "git merge feat -m '第一行\n\n第二段：修 `guard` 里 $x 的问题'",
+                    'git merge feat -m "第一行\n\n第二段"'):
             self.allow(self.repo, cmd)
-        # 双引号里的 $ 和反引号、$(cat <<EOF)：shell 会展开或执行，按看不懂拦
-        for cmd in ('git merge feat -m "修 `guard`"', 'git merge feat -m "花了 $5"',
-                    "git merge feat -m \"$(cat <<'EOF'\n说明\nEOF\n)\"", "git merge fea[t]", "git merge fea\\?"):
-            self.deny(self.repo, cmd)
+        # 双引号里的 $、反引号、反斜杠、!，引号外面的重定向、通配符、反斜杠：一律拦
+        for cmd in ('git merge feat -m "修 `guard`"', 'git merge feat -m "花了 $5"', 'git merge feat -m "a\\nb"',
+                    'git merge feat -m "好!"', "git merge feat -m \"$(cat <<'EOF'\n说明\nEOF\n)\"",
+                    "git merge fea[t]", "git merge fea\\?", "git merge feat 2>&1", "git merge feat > /dev/null 2>&1",
+                    "git merge feat # 注释", "git merge feat\ngit status", "=git merge feat"):
+            self.deny(self.repo, cmd, "请单独运行")
+        self.deny(self.repo, "git merge -m 'x' feat -m 'y")  # 引号没闭合
 
     def test_merge_用C指到别的仓库去那里查(self):
         self.commit(self.repo, "feat")
@@ -1252,10 +1299,11 @@ class UploadGateTest(GuardCase):
         for cmd in ("git push", "git push origin", "git push origin main", "git push origin main:main",
                     "git push origin HEAD", "git push origin HEAD:main", "git push origin main:refs/heads/main",
                     "git push -u origin main", "git push --set-upstream origin main", "git push -q",
-                    "rtk git push", "rtk proxy git push origin main", "git push 2>&1",
-                    "git push origin main > /dev/null 2>&1", f"git -C {self.repo} push",
-                    "git push --dry-run origin main"):
+                    "rtk git push", "rtk proxy git push origin main", f"git -C {self.repo} push",
+                    "git push --dry-run origin main", "git push 'origin' \"main\""):
             self.allow(self.repo, cmd)
+        for cmd in ("git push 2>&1", "git push origin main > /dev/null 2>&1", "git push origin main 2>/dev/null"):
+            self.deny(self.repo, cmd, "请单独运行")
 
     def test_push_本地建一个叫origin_main的分支骗不了守卫(self):
         a = self.commit(self.repo)
@@ -1388,6 +1436,23 @@ class UploadGateTest(GuardCase):
         self.allow(self.repo, "git status", env=env)
         self.deny(self.repo, "git push", "还没通过 Codex 审核")  # 对照：不慢的时候照常查
 
+    def test_认角色的时候就超时_上传命令也拦(self):
+        # Codex 第 3 轮：以前命令是认完角色才登记的，认角色时（要跑 git）超时了，守卫不知道在查什么，就放行了
+        slow = self.make_dir("slow-role-bin")
+        real = shutil.which("git")
+        self.write(os.path.join(slow, "git"), f'#!/bin/sh\nsleep 8\nexec {real} "$@"\n')  # 每次调 git 都很慢
+        os.chmod(os.path.join(slow, "git"), 0o755)
+        env = {"PATH": slow + os.pathsep + os.environ["PATH"], "AGENT_DEV_TEAM_GUARD_TIMEOUT": "1"}
+        for cmd in ("git push", "git merge feat", "gh pr create --fill", "gh api -X POST repos/o/r/git/refs",
+                    "cd / && git pu''sh", NESTED_QUOTES):
+            start = time.monotonic()
+            self.deny(self.repo, cmd, "超时", env=env)
+            self.deny(self.repo, cmd, "超时", env=env, agent_id="a1")  # 子代理一样
+            self.assertLess(time.monotonic() - start, 6)
+        self.allow(self.repo, "git status", env=env)
+        self.allow(self.repo, "ls -la", env=env)
+        self.allow(self.repo, "git push", env=dict(env, AGENT_DEV_TEAM="off"))  # 守卫关了就不管
+
     def test_一长串eval不会把守卫拖慢(self):
         start = time.monotonic()
         self.deny(self.repo, "eval " * 60 + "git push")
@@ -1463,13 +1528,55 @@ class UploadGateTest(GuardCase):
     def test_看不懂的命令里出现push或merge_拦(self):
         self.all_reviewed()
         for cmd in ("x='git push'; $x", "echo 'git push' | bash", "$GIT_BIN merge-base a b", "echo push | xargs git"):
-            self.deny(self.repo, cmd, "看不懂这条命令")
+            self.deny(self.repo, cmd, "请单独运行")
         for cmd in ("$GIT push", "git $SUB origin main", "x=push; git $x", "git -c alias.p=push p"):
             self.deny(self.repo, cmd)
         # 审核关关掉（又不是半自动）就没什么要查的
         off = {"AGENT_DEV_TEAM_CODEX": "off"}
         for cmd in ("x='git push'; $x", "$GIT push", "cd / && git push", "git push --force"):
             self.allow(self.repo, cmd, env=off)
+
+    # ----- 不靠拆命令 -----
+
+    def test_原文里有这些词就必须是最简单的上传写法_不管拆命令认不认得出(self):
+        self.all_reviewed()
+        # 下面这些，拆命令那一套一条都认不出（见已知限制），负责人这边照样拦
+        for cmd in ("python3 -c \"import os; os.system('git push')\"", "node -e 'require(`child_process`).execSync(`git push`)'",
+                    "watch -n1 'git push'", "ssh host 'git merge feat'", "su -c 'git push'", "./push.sh", "make push",
+                    "npm run push", "bash deploy-and-push.sh", "gp() { command git pus''h; }; gp", "hub push origin main",
+                    "git config alias.p push", "gh alias set pm 'pr merge'", "git pu\\sh origin main",
+                    "git $'pu\\x73h'", 'grep "git push" README.md', "echo merge", "cat docs/merge.md",
+                    "git fetch origin feat/merge-x", "python3 other.py --branch feat/merge-x",
+                    "git log --merges | head -3", "cd . && git merge-base main feat", "gh pr view 1 --json mergeable | cat",
+                    "gh pr  create --fill; true", NESTED_QUOTES):
+            self.assertIsNone(check_lead_bash(cmd), cmd)  # 不是被黑名单拦的
+            self.deny(self.repo, cmd, "请单独运行")
+        # 审核关关掉（又不是半自动）才不查
+        self.allow(self.repo, "make push", env={"AGENT_DEV_TEAM_CODEX": "off"})
+        # 引号拼出来的 git push 就是 git push：按上传命令查（这里都审核过了，所以放行）
+        self.allow(self.repo, "git pu''sh")
+        self.allow(self.repo, "'git' \"push\" origin 'main'")
+        self.commit(self.repo)
+        self.deny(self.repo, "git pu''sh", "还没通过 Codex 审核")
+
+    def test_带着这些词但确定不是上传的几种_放行(self):
+        self.commit(self.repo, "feat")  # 没审核的分支也不影响：这些命令不上传
+        review, verify = os.path.join(SCRIPTS, "review.py"), os.path.join(SCRIPTS, "verify.py")
+        for cmd in ("git merge-base main feat", "git log --merges --oneline", "git log --grep push -5",
+                    "git branch --merged", "git branch --no-merged main", "git branch -d feat/merge-fix",
+                    "git worktree add -b feat/push-notify ../wt-push", "git worktree remove ../wt-push",
+                    "git diff main...feat/merge-fix --stat", "git show feat/push-x:README.md", f"git -C {self.repo} log --merges",
+                    "rtk git log --merges", "rtk proxy git merge-base main feat", "git revert --no-edit abc123 -m 1",
+                    "gh pr view 12 --json state,mergedAt,mergeable", "gh pr list --state merged", "gh pr checks 12",
+                    f"python3 {review} --branch feat/merge-fix --base main --cwd {self.repo}",
+                    f"python3 {verify} --branch feat/push-x --cwd {self.repo} --allow 'src/merge/*' --cmd 'npm test'",
+                    f"python3 {os.path.join(SCRIPTS, 'rollback.py')} --commits abc --push"):
+            self.allow(self.repo, cmd)
+        for cmd in (f"python3 {verify} --branch feat --cmd 'git push'", f"python3 {verify} --branch feat --cmd='make push'",
+                    f"python3 {self.tmp}/review.py --branch feat/merge-fix", f"python3 -c 1 {review} merge",
+                    "git -c alias.log=push log", "git --no-pager log --merges", "git log --merges; git push",
+                    "gh pr view 12 --json mergeable && gh pr merge 12", "gh pr -R o/r view --json mergeable"):
+            self.deny(self.repo, cmd)
 
     # ----- gh -----
 
@@ -1479,7 +1586,7 @@ class UploadGateTest(GuardCase):
         self.allow(self.repo, "gh pr view 12")
         self.reviewed(self.repo, "main", "origin/main")
         msg = self.deny(self.repo, "gh pr create --title x --body \"$(cat <<'EOF'\n正文\nEOF\n)\"", "请单独运行")
-        self.assertIn("直接写在引号里", msg)
+        self.assertIn("写在单引号里", msg)
         self.deny(self.repo, 'gh pr create --title "修 `guard`" --body x', "请单独运行")
         for cmd in ("gh pr create --fill", "gh pr create --title 't' --body 'b: git push; rm -rf'", "gh pr create -t x -b y -d",
                     "gh pr create --title '修 `guard`？' --body '## 改了什么\n- `a.py` 里的 $x\n- [x] 测试 *都* 过了'",
@@ -1513,7 +1620,8 @@ class UploadGateTest(GuardCase):
 
     def test_gh_pr_merge和gh_api的写操作_负责人不用(self):
         self.all_reviewed()
-        for cmd in ("gh pr merge 12 --squash", "gh pr merge", "gh -R o/r pr merge 1", "gh pr --repo o/r merge 1"):
+        for cmd in ("gh pr merge 12 --squash", "gh pr merge", "gh -R o/r pr merge 1", "gh pr --repo o/r merge 1",
+                    "rtk proxy gh pr merge 1", "rtk gh pr merge 1"):
             self.deny(self.repo, cmd, "不用 gh pr merge")
         for cmd in ("gh pr new --fill", "gh pr -R o/r create --fill", "gh repo create o/r --source . --push"):
             self.deny(self.repo, cmd, "请单独运行")
@@ -1675,7 +1783,8 @@ class LeadSkillCommandsTest(GuardCase):
             self.allow(self.repo, cmd)
 
     def test_半自动_推任务分支_开PR_rebase后换名重开(self):
-        self.assertIn("直接写在引号里", self.skill)
+        self.assertIn("写在单引号里", self.skill)
+        self.assertIn("2>&1", self.skill)
         self.taught("`git push -u origin <分支>`", "`gh pr create --head <分支>`", "`git pull`",
                     "`git branch <分支>-v2 <分支>`", "`git push -u origin <分支>-v2`",
                     "`gh pr create --head <分支>-v2`", "`gh pr close <旧 PR 号>`")

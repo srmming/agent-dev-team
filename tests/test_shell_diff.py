@@ -14,7 +14,7 @@ import unittest
 
 SCRIPTS = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "hooks", "scripts"))
 sys.path.insert(0, SCRIPTS)
-from guard import may_ship, simple_upload  # noqa: E402
+from guard import harmless, hinted, may_ship, simple_upload, strict_words, upload_form  # noqa: E402
 
 FAKE_GIT = """#!/bin/sh
 case " $* " in *" push "*|*" merge "*|*" pr create "*) echo "$0 $*" >> "$MARK";; esac
@@ -156,6 +156,10 @@ TRICKS = [
     "cat <<EOF\r\nx\r\nEOF\r\ngit push",
     "cat <<EOF}\nx\nEOF}\ngit push\nEOF",
     "{git,pu''sh}",
+    '''echo "$(echo "$(echo "(")")"; git push; echo ")"''',
+    'echo "$(echo "a b" "$(echo ")")")"; git push',
+    'echo "`echo "("`"; git push; echo ")"',
+    'x="$(echo "$(echo "$(echo "(")")")"; git merge feat',
     'echo "$(echo in case of x)"; git push; echo "esac )"',
     'echo "$(echo \'x\' case)"; git push; echo "esac )"',
     'echo "$(echo a # case\n)"; git push; echo "esac)"',
@@ -262,6 +266,13 @@ class ShellDiff(unittest.TestCase):
             hit = [name for name, path, flags in self.shells if self.ran_in(path, flags, script)]
             if hit:
                 self.assertTrue(may_ship(script), f"{'、'.join(hit)} 里真的执行了上传，守卫没认出来：{script!r}")
+                # 负责人这边不靠拆命令：原文里有这些词（或者拆命令认出来了）就要过按字符的检查，
+                # 过得了的只能是最简单的上传写法，不能被当成「确定不是上传」
+                self.assertTrue(hinted(script) or may_ship(script), script)
+                words = strict_words(script)
+                if words is not None:
+                    self.assertFalse(harmless(self.work, words), script)
+                    self.assertTrue(upload_form(words) or words[0] != "git" or words[1] != "push", script)
             else:
                 never.append(script)
         # 清单里大部分写法应该至少在一个 shell 里真的跑起来，不然这个测试等于没测
@@ -273,7 +284,8 @@ class ShellDiff(unittest.TestCase):
             self.assertIsNone(simple_upload(script), script)
         # 对照：最简单的写法认得出
         self.assertEqual(simple_upload("git push origin main"), ("push", ["origin", "main"], None))
-        self.assertEqual(simple_upload("rtk git -C /x merge feat 2>&1"), ("merge", ["feat"], "/x"))
+        self.assertEqual(simple_upload("rtk git -C /x merge feat"), ("merge", ["feat"], "/x"))
+        self.assertIsNone(simple_upload("rtk git -C /x merge feat 2>&1"))
         self.assertEqual(simple_upload("gh pr create --head feat"), ("pr-create", ["--head", "feat"], None))
 
 
