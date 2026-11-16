@@ -371,6 +371,141 @@ print("VERDICT: PASS")
         with self.assertRaises(ValueError):
             records.add_unit(self.repo, feat, "", [feat])  # 必须有起点
 
+    # ----- 审核标准和增量复审 -----
+
+    def logged(self, name, output):
+        """假 Codex：把收到的提示词写进 <name>.txt，再输出 output。返回 (命令, 读提示词的函数)。"""
+        log = os.path.join(self.tmp.name, name + ".txt")
+        cmd = self.script(name, f"import sys\nopen({log!r}, 'w').write(sys.argv[-1])\nsys.stdout.write({output!r})\n")
+
+        def prompt():
+            with open(log, encoding="utf-8") as f:
+                return f.read()
+        return cmd, prompt
+
+    def rv(self, codex_cmd, *args):
+        env = dict(self.env, AGENT_DEV_TEAM_CODEX_CMD=codex_cmd)
+        return self.run_script("review.py", "--branch", "feat", "--cwd", self.repo, *args, env=env)
+
+    def feat_commit(self, text):
+        sh(self.repo, "checkout", "-q", "feat")
+        self.write("src/a.py", text)
+        sha = self.commit("修")
+        sh(self.repo, "checkout", "-q", "main")
+        return sha
+
+    def test_提示词写明严重的标准(self):
+        cmd, prompt = self.logged("std", "VERDICT: PASS\n")
+        self.assertEqual(self.rv(cmd)[0], 0)
+        text = prompt()
+        for words in ("守卫防的是手误，不防刻意绕过", "正常使用就会碰到", "结果错误、丢数据、没审过的代码进了主分支或上线、该回滚时不回滚、流程卡死",
+                      "要刻意构造的命令或环境才会触发的", "算「一般」：照样列出来，但不挡合并", "不要挑风格问题",
+                      "每条带文件和行号", "VERDICT: PASS 或 VERDICT: FAIL"):
+            self.assertIn(words, text)
+        self.assertNotIn("这是复审", text)
+
+    def test_不通过存下记录_下一轮只复审增量_通过后守卫放行整个分支(self):
+        import guard
+        main, tip1 = sh(self.repo, "rev-parse", "main"), sh(self.repo, "rev-parse", "feat")
+        cmd, _ = self.logged("fail", "严重：src/a.py:1 坏了\nVERDICT: FAIL\n")
+        code, out = self.rv(cmd)
+        self.assertEqual(code, 1, out)
+        last = records.load_last(self.repo, "feat")
+        self.assertEqual((last["fork"], last["tip"]), (main, tip1))
+        self.assertIn("严重：src/a.py:1 坏了", last["issues"])
+        tip2 = self.feat_commit("v3\n")
+        cmd, prompt = self.logged("incr", "上一轮的问题已修好\nVERDICT: PASS\n")
+        code, out = self.rv(cmd)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.splitlines()[0], "审核：通过")
+        self.assertIn("增量复审", out)
+        text = prompt()
+        self.assertIn("这是复审", text)
+        self.assertIn("逐条确认上一轮列出的问题是否已修好", text)
+        self.assertIn("严重：src/a.py:1 坏了", text)
+        self.assertIn(f"git diff {tip1}..{tip2}", text)
+        self.assertNotIn(f"git diff {main}..", text)
+        self.assertIn("守卫防的是手误", text)
+        # 记的单元和全量通过一样：起点到顶端整段
+        self.assertEqual(self.units(), [(tip2, set(sh(self.repo, "rev-list", "main..feat").split()))])
+        self.assertEqual(records.units(self.repo)[0]["fork"], main)
+        self.assertEqual(guard.uncovered(self.repo, "main..feat"), [])
+        self.assertIsNone(records.load_last(self.repo, "feat"))
+        self.assertEqual(records.fails(self.repo, "feat"), 0)
+
+    def test_增量不通过_接着记下这一轮_上一轮的严重问题没修好也算不通过(self):
+        fail1, _ = self.logged("f1", "严重：问题一\nVERDICT: FAIL\n")
+        self.rv(fail1)
+        tip2 = self.feat_commit("v3\n")
+        fail2, prompt = self.logged("f2", "问题一：没修好\nVERDICT: FAIL\n")
+        code, out = self.rv(fail2)
+        self.assertEqual(out.splitlines()[0], "审核：不通过（第 2 轮）")
+        self.assertIn("上一轮的严重问题没修好，也算有严重问题", prompt())
+        last = records.load_last(self.repo, "feat")
+        self.assertEqual(last["tip"], tip2)
+        self.assertIn("问题一：没修好", last["issues"])
+
+    def test_rebase后_加full_找不到记录_上一轮顶端不在历史里_都走全量(self):
+        fail, _ = self.logged("f", "严重：x\nVERDICT: FAIL\n")
+        self.rv(fail)
+        cmd, prompt = self.logged("full", "VERDICT: FAIL\n")
+        # --full：有记录也全量
+        main, tip = sh(self.repo, "rev-parse", "main"), sh(self.repo, "rev-parse", "feat")
+        self.rv(cmd, "--full")
+        self.assertIn(f"git diff {main}..{tip}", prompt())
+        self.assertNotIn("这是复审", prompt())
+        # 找不到记录：全量，也不提记录的事
+        records.clear_last(self.repo, "feat")
+        code, out = self.rv(cmd)
+        self.assertNotIn("这是复审", prompt())
+        self.assertNotIn("用不上", out)
+        # 上一轮的顶端不在这个分支的历史里（比如改写过提交）
+        side = self.script_commit_on_side()
+        records.save_last(self.repo, "feat", main, side, "严重：x")
+        code, out = self.rv(cmd)
+        self.assertNotIn("这是复审", prompt())
+        self.assertIn("不在这个分支现在的历史里", out)
+        # rebase 过：起点变了
+        records.save_last(self.repo, "feat", main, tip, "严重：x")
+        self.write("other.txt", "x\n")
+        new_main = self.commit("主分支往前走")
+        sh(self.repo, "checkout", "-q", "feat")
+        sh(self.repo, "rebase", "-q", "main")
+        sh(self.repo, "checkout", "-q", "main")
+        code, out = self.rv(cmd)
+        self.assertIn(f"git diff {new_main}..{sh(self.repo, 'rev-parse', 'feat')}", prompt())
+        self.assertNotIn("这是复审", prompt())
+        self.assertIn("起点变了", out)
+
+    def script_commit_on_side(self):
+        sh(self.repo, "checkout", "-q", "-b", "side", "feat")
+        self.write("src/a.py", "side\n")
+        sha = self.commit("别的")
+        sh(self.repo, "checkout", "-q", "main")
+        return sha
+
+    def test_手动指定since和last_issues(self):
+        tip1 = sh(self.repo, "rev-parse", "feat")
+        tip2 = self.feat_commit("v3\n")
+        issues = os.path.join(self.tmp.name, "第5轮.txt")
+        with open(issues, "w", encoding="utf-8") as f:
+            f.write("严重：旧脚本跑的那一轮发现的问题\nVERDICT: FAIL\n")
+        cmd, prompt = self.logged("manual", "VERDICT: PASS\n")
+        code, out = self.rv(cmd, "--since", tip1[:7], "--last-issues", issues)
+        self.assertEqual(code, 0, out)
+        text = prompt()
+        self.assertIn("这是复审", text)
+        self.assertIn("严重：旧脚本跑的那一轮发现的问题", text)
+        self.assertIn(f"git diff {tip1}..{tip2}", text)
+        self.assertEqual(self.units(), [(tip2, set(sh(self.repo, "rev-list", "main..feat").split()))])
+        # 参数不全、和 --full 一起用、文件读不了、提交找不到：出错，不计轮数
+        for args in (("--since", tip1), ("--last-issues", issues), ("--full", "--since", tip1, "--last-issues", issues),
+                     ("--since", tip1, "--last-issues", "/no/such/file"), ("--since", "nope", "--last-issues", issues)):
+            code, out = self.rv(cmd, *args)
+            self.assertEqual(code, 2, args)
+            self.assertTrue(out.startswith("审核：出错（不计入失败轮数）"), out)
+        self.assertEqual(records.fails(self.repo, "feat"), 0)
+
 
 class DeployCheckCmd(RepoCase):
     def config(self, cmd, retries=2):

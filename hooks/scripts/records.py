@@ -104,3 +104,36 @@ def clear_fails(cwd, branch):
     p = _fails_path(cwd, branch)
     if p and os.path.exists(p):
         os.remove(p)
+
+
+# ---------- 上一轮没通过的审核：下一轮只复审增量用 ----------
+# last-<分支>.json：{"fork": 起点, "tip": 上一轮审到的顶端, "issues": 上一轮 Codex 的输出全文}
+
+def _last_path(cwd, branch):
+    return _path(cwd, "last-" + re.sub(r"[^A-Za-z0-9_.-]", "_", branch) + ".json")
+
+
+def save_last(cwd, branch, fork, tip, issues):
+    p = _last_path(cwd, branch)
+    if p:
+        tmp = f"{p}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"fork": fork, "tip": tip, "issues": issues}, f, ensure_ascii=False)
+        os.replace(tmp, p)
+
+
+def load_last(cwd, branch):
+    """上一轮没通过的那次审核。没有、读不懂返回 None。"""
+    try:
+        with open(_last_path(cwd, branch), encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        return None
+    ok = isinstance(d, dict) and all(isinstance(d.get(k), str) and SHA_RE.match(d[k]) for k in ("fork", "tip"))
+    return d if ok and isinstance(d.get("issues"), str) else None
+
+
+def clear_last(cwd, branch):
+    p = _last_path(cwd, branch)
+    if p and os.path.exists(p):
+        os.remove(p)
