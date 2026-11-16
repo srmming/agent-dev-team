@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """agent-dev-team 上线检查：推送后确认线上是不是正常。
 1. 项目配置有 deploy_check.cmd：等一会儿后跑它，失败就重试。
-2. 没配命令、远端是 GitHub、本机有 gh：查这个提交的检查结果和部署状态。
+2. 没配命令、远端是 GitHub、本机有 gh：查这个提交的检查结果（check runs）、提交状态（commit statuses）和部署状态。
 3. 都没有：无法判断。
 输出第一行是结论。退出码：通过 0，不通过 1，无法判断 3。
 """
@@ -23,6 +23,7 @@ CMD_TIMEOUT = 300
 CHECK_OK = {"success", "neutral", "skipped"}
 DEPLOY_OK = {"success", "inactive"}
 DEPLOY_BAD = {"failure", "error"}
+STATUS_BAD = {"failure", "error"}
 
 
 def tail(text, n=TAIL):
@@ -72,9 +73,9 @@ def github_repo(cwd):
 
 
 def github_status(cwd, repo, sha):
-    """查一次。返回 (状态, 说明行)，状态是 ok / fail / running / none。"""
     """查一次。返回 (状态, 说明行)，状态是 ok / fail / running / none。
     同名检查、同一环境的部署可能有好几次（重跑、重新部署），每个只看最新一次。
+    检查结果（check runs）和提交状态（commit statuses）是两套东西，有的 CI 只报其中一套，两套都查。
     任何一项查询失败都不报通过：确定有失败报 fail，否则报 none（无法判断）。"""
     bad, running, unknown, seen = [], [], [], 0
     runs = gh_api(cwd, f"repos/{repo}/commits/{sha}/check-runs?per_page=100")
@@ -90,6 +91,25 @@ def github_status(cwd, repo, sha):
             running.append(f"检查 {name} 还在跑")
         elif c.get("conclusion") not in CHECK_OK:
             bad.append(f"检查 {name}：{c.get('conclusion')}")
+    # 提交状态：接口给的是每个 context 最新的一条，外加一个合起来的 state
+    st = gh_api(cwd, f"repos/{repo}/commits/{sha}/status?per_page=100")
+    if not isinstance(st, dict) or not isinstance(st.get("statuses"), list):
+        unknown.append("查不到提交状态（gh 查询失败）")
+    else:
+        items = [x for x in st["statuses"] if isinstance(x, dict)]
+        if isinstance(st.get("total_count"), int) and st["total_count"] > len(items):
+            unknown.append(f"提交状态有 {st['total_count']} 个，只查到 {len(items)} 个")
+        for x in items:
+            seen += 1
+            if x.get("state") in STATUS_BAD:
+                bad.append(f"状态 {x.get('context', '?')}：{x.get('state')}")
+            elif x.get("state") != "success":
+                running.append(f"状态 {x.get('context', '?')} 还没出结果（{x.get('state')}）")
+        # 合起来的 state 也看一眼：一条状态都没有时它是 pending，那不算在等
+        if st.get("state") in STATUS_BAD and not any(x.get("state") in STATUS_BAD for x in items):
+            bad.append(f"提交状态：{st.get('state')}")
+        elif items and st.get("state") == "pending" and all(x.get("state") == "success" for x in items):
+            running.append("提交状态还没出结果（pending）")
     deps = gh_api(cwd, f"repos/{repo}/deployments?sha={sha}&per_page=100")
     if not isinstance(deps, list):
         unknown.append("查不到部署记录（gh 查询失败）")
@@ -114,7 +134,7 @@ def github_status(cwd, repo, sha):
         return "running", running
     if seen:
         return "ok", []
-    return "none", ["GitHub 上这个提交没有检查结果，也没有部署记录"]
+    return "none", ["GitHub 上这个提交没有检查结果、没有提交状态，也没有部署记录"]
 
 
 def _latest(items, key, time_key):
@@ -174,7 +194,7 @@ def check_by_github(cwd, repo, sha, a):
         time.sleep(interval)
     if state == "ok":
         print("上线检查：通过")
-        print("GitHub 上的检查和部署都成功")
+        print("GitHub 上的检查、提交状态和部署都成功")
         return 0
     if state == "fail":
         print("上线检查：不通过")

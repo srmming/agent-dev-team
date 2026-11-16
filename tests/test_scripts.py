@@ -411,12 +411,16 @@ class DeployCheckGitHub(RepoCase):
         self.addCleanup(lambda: setattr(deploy_check, "gh_api", orig[1]))
         deploy_check.have_gh = lambda: True
 
-    def fake_api(self, runs, deps, statuses):
+    NO_STATUS = {"state": "pending", "statuses": [], "total_count": 0}  # 一条提交状态都没有时接口就返回这个
+
+    def fake_api(self, runs, deps, statuses, commit_status=NO_STATUS):
         def api(cwd, path):
             self.calls.append(path)
             self.assertIn("own/proj", path)
             if "/check-runs" in path:
                 return runs
+            if f"/commits/{self.sha}/status" in path:
+                return commit_status
             if "/statuses" in path:
                 return statuses
             if "/deployments" in path:
@@ -438,12 +442,14 @@ class DeployCheckGitHub(RepoCase):
         self.assertEqual(out.splitlines()[0], "上线检查：通过")
         self.assertTrue(any(self.sha in c for c in self.calls))
 
-    def fake_by_id(self, runs, deps, statuses):
+    def fake_by_id(self, runs, deps, statuses, commit_status=NO_STATUS):
         """statuses 按部署 id 给。"""
         def api(cwd, path):
             self.calls.append(path)
             if "/check-runs" in path:
                 return runs
+            if f"/commits/{self.sha}/status" in path:
+                return commit_status
             if "/statuses" in path:
                 return statuses.get(int(path.split("/deployments/")[1].split("/")[0]))
             if "/deployments" in path:
@@ -490,6 +496,76 @@ class DeployCheckGitHub(RepoCase):
         # 查到确定的失败时，部分查询失败也报不通过
         self.fake_by_id({"check_runs": [{"id": 1, "name": "t", "status": "completed", "conclusion": "failure"}]},
                         None, {})
+        self.assertEqual(self.d()[0], 1)
+
+    def status(self, *items, state=None):
+        """提交状态接口的返回：items 是 (context, state)。"""
+        states = [s for _, s in items]
+        if state is None:
+            state = ("failure" if "failure" in states or "error" in states else
+                     "pending" if "pending" in states or not states else "success")
+        return {"state": state, "total_count": len(items),
+                "statuses": [{"context": c, "state": s} for c, s in items]}
+
+    def test_提交状态失败_不通过(self):
+        # Codex 第 3 轮：只查了 check runs 和部署，有的 CI 只报提交状态（commit statuses），失败了也报通过
+        for bad in ("failure", "error"):
+            self.fake_api(self.OK_RUNS, [], [], self.status(("ci/build", "success"), ("ci/test", bad)))
+            code, out = self.d()
+            self.assertEqual(code, 1, out)
+            self.assertEqual(out.splitlines()[0], "上线检查：不通过")
+            self.assertIn("ci/test", out)
+            self.assertNotIn("ci/build", out)
+        self.assertTrue(any(c.endswith(f"/commits/{self.sha}/status?per_page=100") for c in self.calls))
+        # 只有提交状态、没有 check runs 的仓库也一样
+        self.fake_api({"total_count": 0, "check_runs": []}, [], [], self.status(("ci", "failure")))
+        self.assertEqual(self.d()[0], 1)
+        # 合起来的 state 是失败，明细里却看不出来：也算不通过
+        self.fake_api(self.OK_RUNS, [], [], self.status(("ci", "success"), state="failure"))
+        code, out = self.d()
+        self.assertEqual(code, 1, out)
+
+    def test_提交状态成功_通过_只有提交状态也行(self):
+        self.fake_api({"total_count": 0, "check_runs": []}, [], [], self.status(("ci/build", "success")))
+        code, out = self.d()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.splitlines()[0], "上线检查：通过")
+        # 一条提交状态都没有（接口返回 pending、空列表）不算在等：照 check runs 的结果来
+        self.fake_api(self.OK_RUNS, [], [], self.NO_STATUS)
+        self.assertEqual(self.d()[0], 0)
+
+    def test_提交状态还在等_按等待处理_超时无法判断(self):
+        self.fake_api(self.OK_RUNS, [], [], self.status(("ci/build", "success"), ("ci/deploy", "pending")))
+        code, out = self.d()
+        self.assertEqual(code, 3, out)
+        self.assertEqual(out.splitlines()[0], "上线检查：无法判断")
+        self.assertIn("还没跑完", out)
+        self.assertIn("ci/deploy", out)
+        # 等到它出结果就通过
+        answers = [self.status(("ci/deploy", "pending")), self.status(("ci/deploy", "success"))]
+
+        def api(cwd, path):
+            if "/check-runs" in path:
+                return self.OK_RUNS
+            if "/status" in path and "/deployments" not in path:
+                return answers.pop(0) if len(answers) > 1 else answers[0]
+            return []
+        deploy_check.gh_api = api
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = deploy_check.main(["--cwd", self.repo, "--interval", "0", "--max-poll", "30"])
+        self.assertEqual(code, 0, buf.getvalue())
+
+    def test_提交状态查询失败_无法判断(self):
+        for broken in (None, [], {"state": "success"}, {"state": "success", "statuses": "x"},
+                       {"state": "success", "total_count": 150, "statuses": [{"context": "ci", "state": "success"}]}):
+            self.fake_api(self.OK_RUNS, [], [], broken)
+            code, out = self.d()
+            self.assertEqual(code, 3, (broken, out))
+            self.assertEqual(out.splitlines()[0], "上线检查：无法判断")
+        # 查到确定的失败时，提交状态查询失败也报不通过
+        self.fake_api({"check_runs": [{"id": 1, "name": "t", "status": "completed", "conclusion": "failure"}]},
+                      [], [], None)
         self.assertEqual(self.d()[0], 1)
 
     def test_有失败(self):
