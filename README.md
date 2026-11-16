@@ -22,6 +22,22 @@
 
 子代理守则全文在 `hooks/rules/subagent.md`（窗口收到 `【派活单】` 时注入的就是它），四个 `agents/dev-*.md` 里是同一份。它不放在 `agents/` 下，因为那里的文件会被当成子代理。
 
+## 安装
+
+首选从市场安装：
+
+1. 在 claude.ai 或 Claude 桌面版：Customize → Plugins → Add → Add marketplace，选这个仓库（`srmming/agent-dev-team`）。
+2. 装 `agent-dev-team`。需要状态栏，再装 `agent-dev-team-status`。
+3. 之后可以打开「自动同步」，或者手动点「检查更新」。只有改了 `plugin.json` 里的版本号，才会收到更新。
+
+命令行里的写法：`/plugin marketplace add srmming/agent-dev-team`，再 `/plugin install agent-dev-team --marketplace srmming/agent-dev-team`。
+
+私有仓库也能用，在 claude.ai 上要先授权 Claude 的 GitHub 应用读这个仓库。
+
+以前手动上传过 zip 的：装好市场版后，把上传的那份删掉。同名时市场版优先，上传的那份会显示未加载。
+
+备用方式：把仓库打成 zip 手动上传，或者用 `claude --plugin-dir /path/to/agent-dev-team` 只在这一次打开的 Claude Code 里加载。
+
 ## 状态栏（可选）
 
 仓库的 `statusbar/` 目录是一个配套小插件 agent-dev-team-status：在输入框上方显示当前模式和在跑的子代理，可以点按钮切换「负责人模式 / 普通对话」「全自动 / 半自动」。它和主插件读写同一个对话状态文件。

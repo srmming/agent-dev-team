@@ -1,0 +1,21 @@
+{
+  "name": "agent-dev-team",
+  "owner": {
+    "name": "Ming"
+  },
+  "metadata": {
+    "description": "Agent 开发团队插件市场：主插件和状态栏小插件。"
+  },
+  "plugins": [
+    {
+      "name": "agent-dev-team",
+      "source": "./",
+      "description": "Agent 开发团队：负责人只想和调度，子代理写代码，脚本验收，Codex 审核后合并上线。"
+    },
+    {
+      "name": "agent-dev-team-status",
+      "source": "./statusbar",
+      "description": "agent-dev-team 的状态栏：在输入框上方显示当前模式和在跑的子代理，可点按钮切换模式。"
+    }
+  ]
+}

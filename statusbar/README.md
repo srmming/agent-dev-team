@@ -35,7 +35,9 @@ claude --plugin-dir /path/to/agent-dev-team/statusbar
 
 ## 常驻安装
 
-在 `~/.claude/settings.json` 的 `env` 里加一行（路径换成你电脑上这个文件夹的完整路径）：
+首选从同一个市场装：先按主 README 的「安装」把 `srmming/agent-dev-team` 添加成市场，再装 `agent-dev-team-status`（命令行：`/plugin install agent-dev-team-status --marketplace srmming/agent-dev-team`）。
+
+备用写法：在 `~/.claude/settings.json` 的 `env` 里加一行（路径换成你电脑上这个文件夹的完整路径）：
 
 ```json
 { "env": { "CLAUDE_CODE_PLUGIN_DIRS": "/path/to/agent-dev-team/statusbar" } }
@@ -45,7 +47,8 @@ claude --plugin-dir /path/to/agent-dev-team/statusbar
 
 ## 卸载
 
-- 把那一行从 `~/.claude/settings.json` 删掉，重开 Claude Code。
+- 从市场装的，在插件页卸载。
+- 用环境变量装的：把那一行从 `~/.claude/settings.json` 删掉，重开 Claude Code。
 - 旧版 `lead-status` 和它功能重复，装了新版就把旧版卸掉，免得输入框上方出现两行。
 
 ## 开发
