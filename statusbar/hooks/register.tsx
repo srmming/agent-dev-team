@@ -74,12 +74,6 @@ async function readJson($: $, path: string): Promise<Raw> {
 
 // ---------- 读状态 ----------
 
-function tokensText(v: unknown): string | null {
-  if (typeof v === 'number' && Number.isFinite(v)) return v.toLocaleString('en-US')
-  if (typeof v === 'string' && v.trim() !== '') return v.trim()
-  return null
-}
-
 async function loadView($: $): Promise<StatusView> {
   const root = await projectRoot($)
   // 和主插件 common.guard_off 一样：AGENT_DEV_TEAM 是 off（不分大小写），或项目根有关闭文件
@@ -101,7 +95,7 @@ async function loadView($: $): Promise<StatusView> {
   const status = typeof data.status === 'string' && data.status.trim() !== '' ? data.status.trim() : null
   // pool：小任务池里攒了几个，非负整数；没有或不对当 0
   const pool = typeof data.pool === 'number' && Number.isInteger(data.pool) && data.pool >= 0 ? data.pool : 0
-  return { off, role, auto, status, pool, tokens: tokensText(data.tokens) }
+  return { off, role, auto, status, pool }
 }
 
 type Row = { id: string; type: string; teammateId?: string; status: string; name?: string; description: string }
@@ -130,7 +124,7 @@ async function refresh($: $, include?: RunningAgent, exclude?: string): Promise<
 
 // ---------- 写状态（按钮） ----------
 
-// 只改给出的键，其余键（status、tokens……）原样保留
+// 只改给出的键，其余键（status、pool……）原样保留
 async function writeMode($: $, patch: { role?: string; auto?: string }): Promise<void> {
   const file = await sessionFile($)
   const data = { ...(await readJson($, file)), ...patch }
@@ -162,25 +156,24 @@ function statusWord(v: StatusView, n: number): string {
   return `${big}中`
 }
 
-function statusLine(v: StatusView, n: number): string {
-  const word = statusWord(v, n)
-  return n > 0 ? `● ${word} · ${n} 个子代理在跑` : `● ${word}`
+
+// 收起那一行「●」后面的后半句：有子代理在跑时带上个数
+function agentsNote(n: number): string | null {
+  return n > 0 ? `· ${n} 个子代理在跑` : null
+}
+
+// 状态点的颜色：什么都没在做（没写 status、没有子代理）是灰色，别的用强调色
+function dotColor(v: StatusView, n: number): string {
+  return v.status === null && n === 0 ? 'inactive' : 'claude'
 }
 
 type Column = { key: string; title: string; big: string; small: string }
 
-// 详情的几栏：模式 / 现在在做 / 子代理 / 小任务池，状态文件里有 tokens 时再加一栏 token 用量
+// 详情的三栏：现在在做 / 子代理 / 小任务池（模式就是上面那排按钮，不再重复）
 function columns(v: StatusView, list: readonly RunningAgent[]): Column[] {
   const n = list.length
-  const isLead = v.role !== 'normal'
   const doing = v.status === null ? { big: idleWord(n), small: null } : splitStatus(v.status)
-  const out: Column[] = [
-    {
-      key: 'col-mode',
-      title: '模式',
-      big: isLead ? '负责人' : '普通对话',
-      small: isLead ? `${v.auto === 'semi' ? '半自动' : '全自动'} · 只调度，不写代码` : '这个窗口自己直接改文件',
-    },
+  return [
     { key: 'col-doing', title: '现在在做', big: doing.big, small: doing.small ?? '—' },
     {
       key: 'col-agents',
@@ -190,8 +183,6 @@ function columns(v: StatusView, list: readonly RunningAgent[]): Column[] {
     },
     { key: 'col-pool', title: '小任务池', big: `攒了 ${v.pool} 个`, small: `攒够 ${POOL_BATCH} 个一起派` },
   ]
-  if (v.tokens !== null) out.push({ key: 'col-tokens', title: 'token 用量', big: v.tokens, small: '这个对话' })
-  return out
 }
 
 // ---------- 注册 ----------
@@ -235,42 +226,51 @@ export const register: Register = on => {
     const isOpen = await read($, expanded)
     const isLead = v.role !== 'normal'
     const isFull = v.auto !== 'semi'
+    const n = list.length
+    const note = agentsNote(n)
 
+    // 一组互斥按钮：选中的高亮，没选中的淡色；点已选中的不做事
+    const seg = (key: string, label: string, active: boolean, press: () => Promise<void>) => (
+      <Button
+        key={key}
+        label={label}
+        variant={active ? 'primary' : undefined}
+        dimColor={!active}
+        onPress={() => (active ? undefined : press())}
+      />
+    )
+
+    // 收起时这一行：[模式两键]  [自动两键]  ● 状态 · 子代理数 …… 详情
+    // 按钮组不收缩；窄终端时只截短状态文字，不折行
     const row = (
-      <Box key="row" flexDirection="row" columnGap={1} alignItems="center">
-        <Button
-          key="role-lead"
-          label="负责人模式"
-          variant={isLead ? 'primary' : undefined}
-          dimColor={!isLead}
-          onPress={() => (isLead ? undefined : writeMode($, { role: 'lead' }))}
-        />
-        <Button
-          key="role-normal"
-          label="普通对话"
-          variant={isLead ? undefined : 'primary'}
-          dimColor={isLead}
-          onPress={() => (isLead ? writeMode($, { role: 'normal' }) : undefined)}
-        />
+      <Box key="row" flexDirection="row" columnGap={2} alignItems="center">
+        <Box key="roles" flexDirection="row" flexShrink={0}>
+          {seg('role-lead', '负责人模式', isLead, () => writeMode($, { role: 'lead' }))}
+          {seg('role-normal', '普通对话', !isLead, () => writeMode($, { role: 'normal' }))}
+        </Box>
         {isLead ? (
-          <Box key="auto" flexDirection="row" marginLeft={1}>
-            <Button
-              key="auto-full"
-              label="全自动"
-              variant={isFull ? 'primary' : undefined}
-              dimColor={!isFull}
-              onPress={() => (isFull ? undefined : writeMode($, { auto: 'full' }))}
-            />
-            <Button
-              key="auto-semi"
-              label="半自动"
-              variant={isFull ? undefined : 'primary'}
-              dimColor={isFull}
-              onPress={() => (isFull ? writeMode($, { auto: 'semi' }) : undefined)}
-            />
+          <Box key="autos" flexDirection="row" flexShrink={0}>
+            {seg('auto-full', '全自动', isFull, () => writeMode($, { auto: 'full' }))}
+            {seg('auto-semi', '半自动', !isFull, () => writeMode($, { auto: 'semi' }))}
           </Box>
         ) : null}
-        {isLead ? <Text>{statusLine(v, list.length)}</Text> : <Text dimColor>这个窗口自己直接改文件</Text>}
+        {isLead ? (
+          <Box key="status" flexDirection="row" columnGap={1} flexShrink={1} overflow="hidden">
+            <Text color={dotColor(v, n)}>●</Text>
+            <Text bold wrap="truncate-end">
+              {statusWord(v, n)}
+            </Text>
+            {note !== null ? (
+              <Text dimColor wrap="truncate-end">
+                {note}
+              </Text>
+            ) : null}
+          </Box>
+        ) : (
+          <Text dimColor wrap="truncate-end">
+            这个窗口自己直接改文件
+          </Text>
+        )}
         <Box key="gap" flexGrow={1} />
         <Button
           key="details"
@@ -283,15 +283,29 @@ export const register: Register = on => {
     )
     if (!isOpen) return row
 
+    // 展开：按钮行下面空一行，再是一张圆角卡片，三栏等宽，每栏 小标题 / 粗体大字 / 灰色小字
     return (
       <Box key="band" flexDirection="column">
         {row}
-        <Box key="details-body" flexDirection="row" columnGap={2} paddingLeft={2} paddingTop={1}>
+        <Box
+          key="details-body"
+          flexDirection="row"
+          marginTop={1}
+          borderStyle="round"
+          borderDimColor
+          paddingX={1}
+        >
           {columns(v, list).map(c => (
-            <Box key={c.key} flexDirection="column" flexGrow={1}>
-              <Text dimColor>{c.title}</Text>
-              <Text bold>{c.big}</Text>
-              <Text dimColor>{c.small}</Text>
+            <Box key={c.key} flexDirection="column" width="33%" flexGrow={1} paddingRight={2}>
+              <Text dimColor wrap="truncate-end">
+                {c.title}
+              </Text>
+              <Text bold wrap="truncate-end">
+                {c.big}
+              </Text>
+              <Text dimColor wrap="truncate-end">
+                {c.small}
+              </Text>
             </Box>
           ))}
         </Box>

@@ -109,6 +109,14 @@ const look = async (ui: any) => {
 
 const mount = ($: any, surface: string) => $.ui.mount({ ...BAND, surface })
 
+// 收起那一行的状态：「●」、状态词、子代理数是几段 Text，拼成一句好断言；没有这一块为 undefined
+const statusOf = async (ui: any): Promise<string | undefined> => {
+  const box = await ui.find({ key: 'status' })
+  if (box === undefined) return undefined
+  return box.children.map((c: any) => c.children.join('')).join(' ')
+}
+const dotOf = async (ui: any) => (await ui.findAll({ type: 'Text' })).find((t: any) => t.text === '●')
+
 test('默认（没有状态文件）：负责人模式 + 全自动 + 待命', async ($, on) => {
   setup(on)
   await start($)
@@ -120,7 +128,7 @@ test('默认（没有状态文件）：负责人模式 + 全自动 + 待命', as
     expect(l.isDim('role-normal')).toBe(true)
     expect(l.isOn('auto-full')).toBe(true)
     expect(l.isDim('auto-semi')).toBe(true)
-    expect(l.texts).toContain('● 待命')
+    expect(await statusOf(ui)).toBe('● 待命')
     expect(l.label('details')).toBe('详情')
     await ui.unmount()
   }
@@ -149,6 +157,7 @@ test('状态文件 role=normal：普通对话高亮，没有全自动 / 半自�
     expect(l.isOn('role-normal')).toBe(true)
     expect(l.isDim('role-lead')).toBe(true)
     expect(l.texts).toContain('这个窗口自己直接改文件')
+    expect(await statusOf(ui)).toBeUndefined()
     await ui.unmount()
   }
 })
@@ -184,7 +193,7 @@ test('状态文件里不认识的值按默认处理；status 键优先显示', a
   const l = await look(ui)
   expect(l.isOn('role-lead')).toBe(true)
   expect(l.isOn('auto-full')).toBe(true)
-  expect(l.texts).toContain('● 在改登录页')
+  expect(await statusOf(ui)).toBe('● 在改登录页')
   await ui.unmount()
 })
 
@@ -240,7 +249,7 @@ test('0 / 1 / 2 个子代理的文字', async ($, on) => {
   await start($)
   const text = async () => {
     const ui = await mount($, 'desktop')
-    const t = (await look(ui)).texts.find((x: string) => x.startsWith('●'))
+    const t = await statusOf(ui)
     await ui.unmount()
     return t
   }
@@ -281,7 +290,7 @@ test('status 键有值时用它，后面带子代理数', async ($, on) => {
   setup(on, { file: { status: '等你确认' }, agents: [agent('a1'), agent('a2')] })
   await start($)
   const ui = await mount($, 'desktop')
-  expect((await look(ui)).texts).toContain('● 等你确认 · 2 个子代理在跑')
+  expect(await statusOf(ui)).toBe('● 等你确认 · 2 个子代理在跑')
   await ui.unmount()
 })
 
@@ -321,7 +330,7 @@ const columnsOf = async (ui: any) => {
   return out
 }
 
-test('详情展开和收起：横排四栏 + token 一栏', async ($, on) => {
+test('详情展开和收起：横排三栏，没有「模式」栏，也没有 token', async ($, on) => {
   setup(on, {
     file: { role: 'lead', auto: 'semi', status: '验收：结算页优惠码校验', pool: 2, tokens: 123456 },
     agents: [agent('a1', 'dev-opus'), { ...agent('a2', '查代码'), name: 'dev-sonnet' }],
@@ -330,19 +339,21 @@ test('详情展开和收起：横排四栏 + token 一栏', async ($, on) => {
   for (const surface of SURFACES) {
     const ui = await mount($, surface)
     let l = await look(ui)
-    expect(l.texts).toContain('● 验收中 · 2 个子代理在跑')
+    expect(await statusOf(ui)).toBe('● 验收中 · 2 个子代理在跑')
     expect(await columnsOf(ui)).toBeUndefined()
+    expect(l.all).not.toMatch(/token/i)
 
     await ui.press({ key: 'details' })
     l = await look(ui)
     expect(l.label('details')).toBe('收起')
     const cols = await columnsOf(ui)
-    expect(Object.keys(cols ?? {})).toEqual(['col-mode', 'col-doing', 'col-agents', 'col-pool', 'col-tokens'])
-    expect(cols?.['col-mode']).toEqual(['模式', '负责人', '半自动 · 只调度，不写代码'])
+    expect(Object.keys(cols ?? {})).toEqual(['col-doing', 'col-agents', 'col-pool'])
     expect(cols?.['col-doing']).toEqual(['现在在做', '验收', '结算页优惠码校验'])
     expect(cols?.['col-agents']).toEqual(['子代理', '2 个在跑', 'dev-opus、dev-sonnet'])
     expect(cols?.['col-pool']).toEqual(['小任务池', '攒了 2 个', '攒够 8 个一起派'])
-    expect(cols?.['col-tokens']).toEqual(['token 用量', '123,456', '这个对话'])
+    // 模式只看上面那排按钮，详情里不再有「模式」栏；token 用量整个去掉了
+    expect(l.texts).not.toContain('模式')
+    expect(l.all).not.toMatch(/token|123,456|123456/i)
     // 大字是粗体，小标题和小字是灰色
     const big = (await ui.findAll({ type: 'Text' })).find((t: any) => t.text === '验收')
     expect(big?.props.bold).toBe(true)
@@ -357,14 +368,13 @@ test('详情展开和收起：横排四栏 + token 一栏', async ($, on) => {
   }
 })
 
-test('没写 status、没有 pool / tokens：四栏用默认值，token 那栏整个不出现', async ($, on) => {
+test('没写 status、没有 pool：三栏用默认值', async ($, on) => {
   setup(on)
   await start($)
   const ui = await mount($, 'desktop')
   await ui.press({ key: 'details' })
   const cols = await columnsOf(ui)
-  expect(Object.keys(cols ?? {})).toEqual(['col-mode', 'col-doing', 'col-agents', 'col-pool'])
-  expect(cols?.['col-mode']).toEqual(['模式', '负责人', '全自动 · 只调度，不写代码'])
+  expect(Object.keys(cols ?? {})).toEqual(['col-doing', 'col-agents', 'col-pool'])
   expect(cols?.['col-doing']).toEqual(['现在在做', '待命', '—'])
   expect(cols?.['col-agents']).toEqual(['子代理', '没有在跑', '—'])
   expect(cols?.['col-pool']).toEqual(['小任务池', '攒了 0 个', '攒够 8 个一起派'])
@@ -377,7 +387,7 @@ test('没写 status 但有子代理在跑：现在在做是「开发中」', asy
   setup(on, { agents: [agent('a1', 'dev-opus')] })
   await start($)
   const ui = await mount($, 'desktop')
-  expect((await look(ui)).texts).toContain('● 开发中 · 1 个子代理在跑')
+  expect(await statusOf(ui)).toBe('● 开发中 · 1 个子代理在跑')
   await ui.press({ key: 'details' })
   const cols = await columnsOf(ui)
   expect(cols?.['col-doing']).toEqual(['现在在做', '开发中', '—'])
@@ -393,7 +403,7 @@ test('status 的几种写法：英文冒号、没有冒号、已经带「中」�
     await turnEnd($)
     const ui = await mount($, 'desktop')
     const l = await look(ui)
-    expect(l.texts).toContain(line)
+    expect(await statusOf(ui)).toBe(line)
     // 展开状态会留到下一次，已经展开就不再点
     if (l.label('details') === '详情') await ui.press({ key: 'details' })
     expect((await columnsOf(ui))?.['col-doing']).toEqual(doing)
@@ -420,15 +430,90 @@ test('pool 个数：写了就显示，不合法当 0', async ($, on) => {
   }
 })
 
-test('普通对话的详情：模式栏写普通对话', async ($, on) => {
+test('普通对话的详情：同样三栏，没有「模式」栏，也没有 token', async ($, on) => {
   setup(on, { file: { role: 'normal', tokens: '1.2k' } })
   await start($)
-  const ui = await mount($, 'desktop')
-  await ui.press({ key: 'details' })
-  const cols = await columnsOf(ui)
-  expect(cols?.['col-mode']).toEqual(['模式', '普通对话', '这个窗口自己直接改文件'])
-  expect(cols?.['col-tokens']).toEqual(['token 用量', '1.2k', '这个对话'])
+  for (const surface of SURFACES) {
+    const ui = await mount($, surface)
+    if ((await look(ui)).label('details') === '详情') await ui.press({ key: 'details' })
+    const cols = await columnsOf(ui)
+    expect(Object.keys(cols ?? {})).toEqual(['col-doing', 'col-agents', 'col-pool'])
+    const l = await look(ui)
+    expect(l.texts).not.toContain('模式')
+    expect(l.all).not.toMatch(/token|1\.2k/i)
+    await ui.unmount()
+  }
+})
+
+test('任何情况下都不出现 token 字样（收起 / 展开、数字 / 文字、负责人 / 普通对话）', async ($, on) => {
+  const s = setup(on)
+  await start($)
+  for (const file of [
+    { role: 'lead', tokens: 987654 },
+    { role: 'lead', tokens: '3.4M', status: '派活：登录页' },
+    { role: 'normal', tokens: 42 },
+  ]) {
+    s.setFile(file)
+    await turnEnd($)
+    for (const surface of SURFACES) {
+      const ui = await mount($, surface)
+      for (let i = 0; i < 2; i++) {
+        const l = await look(ui)
+        expect(l.all).not.toMatch(/token|987|3\.4M|42/i)
+        await ui.press({ key: 'details' })
+      }
+      await ui.unmount()
+    }
+  }
+})
+
+test('状态点的颜色：待命是灰色，开发中 / 写了 status 用强调色', async ($, on) => {
+  const s = setup(on)
+  await start($)
+  let ui = await mount($, 'desktop')
+  expect((await dotOf(ui))?.props.color).toBe('inactive')
   await ui.unmount()
+
+  s.agents.push(agent('a1', 'dev-opus'))
+  await $.classic.SubagentStart({ ...base, agent_id: 'a1', agent_type: 'general-purpose' })
+  ui = await mount($, 'desktop')
+  expect((await dotOf(ui))?.props.color).toBe('claude')
+  await ui.unmount()
+
+  s.agents.length = 0
+  s.setFile({ role: 'lead', status: '等你确认' })
+  await turnEnd($)
+  ui = await mount($, 'desktop')
+  expect((await dotOf(ui))?.props.color).toBe('claude')
+  // 状态词是粗体，子代理数是灰色
+  expect((await ui.findAll({ type: 'Text' })).find((t: any) => t.text === '等你确认')?.props.bold).toBe(true)
+  await ui.unmount()
+})
+
+test('详情展开时点按钮：照样写状态文件，详情还在', async ($, on) => {
+  const s = setup(on, { file: { role: 'lead', auto: 'full', status: '验收：登录页', pool: 3 } })
+  await start($)
+  for (const surface of SURFACES) {
+    const ui = await mount($, surface)
+    if ((await look(ui)).label('details') === '详情') await ui.press({ key: 'details' })
+    await ui.press({ key: 'auto-semi' })
+    expect(s.saved()).toEqual({ role: 'lead', auto: 'semi', status: '验收：登录页', pool: 3 })
+    expect((await look(ui)).isOn('auto-semi')).toBe(true)
+    await ui.press({ key: 'role-normal' })
+    expect(s.saved()).toEqual({ role: 'normal', auto: 'semi', status: '验收：登录页', pool: 3 })
+    let l = await look(ui)
+    expect(l.isOn('role-normal')).toBe(true)
+    expect(l.keys).toEqual(['role-lead', 'role-normal', 'details'])
+    expect(Object.keys((await columnsOf(ui)) ?? {})).toEqual(['col-doing', 'col-agents', 'col-pool'])
+    await ui.press({ key: 'role-lead' })
+    await ui.press({ key: 'auto-full' })
+    expect(s.saved()).toEqual({ role: 'lead', auto: 'full', status: '验收：登录页', pool: 3 })
+    l = await look(ui)
+    expect(l.isOn('role-lead')).toBe(true)
+    expect(l.isOn('auto-full')).toBe(true)
+    expect(l.label('details')).toBe('收起')
+    await ui.unmount()
+  }
 })
 
 test('别的进程改了状态文件，每轮结束后显示跟上', async ($, on) => {

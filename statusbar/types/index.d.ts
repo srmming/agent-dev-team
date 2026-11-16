@@ -6,7 +6,6 @@
 //   auto   full / semi
 //   status 状态文件里的 status 键（没有为 null），负责人写成「<节点>：<任务名>」
 //   pool   状态文件里的 pool 键：小任务池攒了几个（没有为 0）
-//   tokens 状态文件里的 tokens 键，转成文字（没有为 null）
 // agents：在跑的子代理，id 和显示的名字
 // expanded：详情是否展开
 export type StatusView = {
@@ -15,7 +14,6 @@ export type StatusView = {
   auto: string
   status: string | null
   pool: number
-  tokens: string | null
 }
 
 export type RunningAgent = { id: string; label: string }
