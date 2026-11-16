@@ -1,0 +1,14 @@
+{
+  "name": "agent-dev-team",
+  "version": "0.1.1",
+  "description": "Agent 开发团队：你开的对话只调度不写代码，子代理开发，push/合并前由 Codex 审核，做完汇报给 Dot 并整理记忆。",
+  "author": {
+    "name": "Ming"
+  },
+  "keywords": [
+    "负责人",
+    "子代理",
+    "codex",
+    "快修"
+  ]
+}
