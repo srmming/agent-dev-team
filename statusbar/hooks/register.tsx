@@ -156,7 +156,6 @@ function statusWord(v: StatusView, n: number): string {
   return `${big}中`
 }
 
-
 // 收起那一行「●」后面的后半句：有子代理在跑时带上个数
 function agentsNote(n: number): string | null {
   return n > 0 ? `· ${n} 个子代理在跑` : null
