@@ -303,6 +303,41 @@ class LeadFlow(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assert_blocked("git merge chain")
 
+    def test_拿旧状态当基准审_撤掉已上线的修复不会被放过(self):
+        old = self.git(self.repo, "rev-parse", "main")
+        self.write(self.repo, "app.py", "修好了\n")
+        self.git(self.repo, "commit", "-q", "-am", "修复")
+        records.add_unit(self.repo, self.git(self.repo, "rev-parse", "HEAD"), old, [self.git(self.repo, "rev-parse", "HEAD")])
+        self.assert_allowed("git push")
+        self.git(self.repo, "push", "-q")
+        wt = os.path.join(self.tmp, "wt-undo")
+        self.git(self.repo, "worktree", "add", "-q", "-b", "undo", wt)
+        self.git(wt, "revert", "--no-edit", "HEAD")
+        review = [os.path.join(SCRIPTS, "review.py"), "--branch", "undo", "--cwd", self.repo]
+        code, out = self.run_review(review + ["--base", old], "VERDICT: FAIL")
+        self.assertEqual((code, out.splitlines()[0]), (0, "审核：没有改动"), out)  # 和旧状态比确实没改动
+        err = self.assert_blocked("git merge undo")
+        self.assertIn("基准太旧", err)
+        self.assert_blocked("git push origin undo:main")
+        # 照提示拿现在的主分支当基准重审：这回有改动，Codex 看得到修复被撤掉了
+        code, out = self.run_review(self.review_line(err), "严重：把修复撤掉了\nVERDICT: FAIL\n")
+        self.assertEqual(code, 1, out)
+        self.assert_blocked("git merge undo")
+
+    def test_上线后回滚_推送不用再审(self):
+        """平常的上线回滚：任务分支审核、合并、推送，然后 rollback.py 撤回合并提交并推送。"""
+        self.task_branch("feat5")
+        self.review_and_merge("feat5", "--no-ff")
+        self.assert_allowed("git push")
+        self.git(self.repo, "push", "-q")
+        merge = self.git(self.repo, "rev-parse", "HEAD")
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "rollback.py"), "--cwd", self.repo,
+                            "--commits", merge, "--push"], capture_output=True, text=True, env=self.env)
+        self.assertEqual((r.returncode, r.stdout.splitlines()[0]), (0, "回滚：完成（已推送）"), r.stdout + r.stderr)
+        self.assertEqual(self.git(os.path.join(self.tmp, "origin.git"), "rev-parse", "main"),
+                         self.git(self.repo, "rev-parse", "HEAD"))
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "feat5")))
+
     def test_多个任务分支先后合并_快进和非快进_推主分支都不误拦(self):
         for name in ("t1", "t2", "t3"):
             self.task_branch(name)  # 三个任务分支都从同一个 main 分出去，各改各的文件

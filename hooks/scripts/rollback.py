@@ -111,7 +111,8 @@ def main(argv=None):
     tree = git(cwd, "rev-parse", "HEAD^{tree}")
     fork = next((ps[0] for _, ps in targets if ps and tree and git(cwd, "rev-parse", ps[0] + "^{tree}") == tree), None)
     if fork:
-        records.add_unit(cwd, done[-1], fork, (git(cwd, "rev-list", f"{fork}..HEAD") or done[-1]).split())
+        records.add_unit(cwd, done[-1], fork, (git(cwd, "rev-list", f"{fork}..HEAD") or done[-1]).split(),
+                         rollback=True)
 
     if a.push:
         # 守卫看不到脚本里的 git push，这里用守卫同一套规则自己查一遍

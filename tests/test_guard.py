@@ -514,6 +514,29 @@ class ShipWords(unittest.TestCase):
             "EOF=1; echo $(echo $((1<<EOF))\n) ; git push\nEOF\n)",
             "echo ${x:-<<EOF}\ngit push\nEOF}\n}",
             "echo \"${x:-'}\"; git push; echo \"'}\"",                  # zsh：双引号里 ${ } 中的单引号不是引号
+            'echo "$(echo in case of x)"; git push; echo "esac )"',   # case 只是个普通的词，引号不能配反
+            'echo "$(echo \'x\' case)"; git push; echo "esac )"',
+            'echo "$(echo a # case\n)"; git push; echo "esac)"',
+            "echo ${x:-{}; git push; echo }",       # ${ } 里普通的 { 不数
+            "echo ${x:-<(git push)}",               # ${ } 里的进程替换会执行
+            "echo ${x:-=(git push)}",
+            "echo ${x:-$'\\''}; git push; echo \\'}",    # $'...' 里的 \' 不是引号的结尾
+            "sh -c -- '-x 2>/dev/null; git push'",  # -c 后面 - 开头的词也是脚本
+            "{ . /dev/stdin; } <<'EOF'\ngit push\nEOF",   # heredoc 挂在别的段上
+            "cat <<'EOF' | . /dev/stdin\ngit push\nEOF",
+            "bash -c 'source /dev/stdin' <<'EOF'\ngit push\nEOF",
+            "echo 'git push' | source /dev/stdin",
+            "cat <<EOF\nx\nE\\\nOF\ngit push\nEOF",  # 没加引号的 heredoc：行尾反斜杠拼出结束符
+            'echo "$(true # )\ngit push\n)"',       # 注释里的 ) 不是命令替换的收尾
+            "cat <((git push))",                    # 进程替换里套子 shell，不是算术
+            "cat <((env git push)) 2>&1 | cat",
+            "cat <<EOF\n$(case x in x) env git push;; esac)\nEOF",       # case 的模式后面的 ) 不是命令替换的收尾
+            "echo ${x:-$(case x in x) git push;; esac)}",
+            "echo \"$(case x in (x) git push;; esac)\"",
+            "x=$(sh <<EOF\nfor i in 1; do git $'pu\\x73h'; done\nEOF)",   # bash：命令替换里 EOF) 也算结束符
+            ": $(sh <<EOF\ngit $'pu\\x73h'\nEOF)",
+            "echo $(echo $(cat <<EOF)\ngit $'pu\\x73h'\nEOF)",
+            "echo \"git $'pu\\x73h'",              # 引号没闭合拆不开，转义还原之后才看得到这个词
         )
         self.not_ship(
             "cat <<'EOF'\n$(git push)\nEOF",      # 结束符加了引号：正文原样，不执行
@@ -523,6 +546,16 @@ class ShipWords(unittest.TestCase):
             "(( i > 3 )) && echo big",
             "[[ $a > $b ]] && echo yes",
             "if [[ -n $x && -f y ]]; then echo merge; fi",
+            "if (( x > 1 )); then echo merge; fi",
+            "bash -e scripts/merge_data.sh",
+            "bash scripts/push_metrics.sh --dry-run",
+            'gh pr --repo "$REPO" view 12',
+            "echo ${x:-merge} ${#arr[@]} ${y//push/pull}",
+            "source .venv/bin/activate && python -m pytest tests/test_merge.py",
+            "echo \"$(date) # merge 完成\"",
+            "for ((i=0; i<3; i++)); do echo $i; done",
+            "echo $(grep -c case notes.txt) merge-requests",
+            "n=$(echo case); echo push-count $n",
             "'$GIT' push",                          # 单引号里的 $ 是原样的字，不是变量
             "git '$x'",
             "git commit -m \"$(cat <<'EOF'\n修 git push 的检查\n\ngit merge 也一样\nEOF\n)\"",
@@ -918,6 +951,45 @@ class ReviewUnitTest(GuardCase):
         # 从已经通过的状态（main）把整段重审一次才行
         self.reviewed(self.repo, "feat", "main")
         self.allow(self.repo, "git merge feat")
+
+    def test_单元里不能夹着目标分支上已经有的提交_撤掉已上线的修复要过审(self):
+        # 独立审核发现的：主分支 G（有 bug）→ H（修好，已推上去）。任务分支撤回 H，拿 G 当基准去审，
+        # 起点 G 和顶端内容一样 →「没有改动」，Codex 看不到修复被撤掉了。
+        g = self.change(self.repo, "app.txt", "有 bug\n", "G")
+        h = self.change(self.repo, "app.txt", "修好了\n", "H")
+        self.git(self.repo, "push", "-q")
+        self.git(self.repo, "checkout", "-q", "-b", "feat")
+        self.git(self.repo, "revert", "--no-edit", h)
+        self.git(self.repo, "checkout", "-q", "main")
+        self.assertEqual(set(self.reviewed(self.repo, "feat", g)), {h, self.git(self.repo, "rev-parse", "feat")})
+        msg = self.deny(self.repo, "git merge feat", "有 1 个提交还没通过 Codex 审核")
+        self.assertIn("基准太旧", msg)
+        self.deny(self.repo, "git push origin feat:main", "还没通过 Codex 审核")
+        self.deny(self.repo, "gh pr create --head feat", "还没通过 Codex 审核")
+        # 再加一个无害的文件也一样（Codex 只会看到那个文件）
+        self.git(self.repo, "checkout", "-q", "feat")
+        self.change(self.repo, "ok.txt", "x\n")
+        self.git(self.repo, "checkout", "-q", "main")
+        self.reviewed(self.repo, "feat", g)
+        self.deny(self.repo, "git merge feat", "还没通过 Codex 审核")
+        # 拿现在的主分支当基准重审（这回 Codex 看得到撤回）才算数
+        self.reviewed(self.repo, "feat", "main")
+        self.allow(self.repo, "git merge feat")
+
+    def test_本地主分支落后于远端时审的_推到远端主分支要重审(self):
+        g = self.git(self.repo, "rev-parse", "main")
+        h = self.change(self.repo, "app.txt", "别人推的修复\n", "H")
+        self.git(self.repo, "push", "-q")
+        self.git(self.repo, "checkout", "-q", "-b", "feat")
+        self.git(self.repo, "revert", "--no-edit", h)
+        self.git(self.repo, "checkout", "-q", "main")
+        self.git(self.repo, "update-ref", "refs/heads/main", g)  # 本地 main 还停在旧状态（只 fetch 没 pull）
+        self.git(self.repo, "reset", "-q", "--hard")
+        self.reviewed(self.repo, "feat", "main")  # 默认基准是本地 main
+        self.deny(self.repo, "git push origin feat:main", "基准太旧")
+        self.deny(self.repo, "git push -u origin feat", "还没通过 Codex 审核")
+        self.reviewed(self.repo, "feat", "refs/remotes/origin/main")
+        self.allow(self.repo, "git push origin feat:main")
 
     def test_单元可以一环扣一环_起点是另一个单元的顶端(self):
         self.commit(self.repo, "feat")

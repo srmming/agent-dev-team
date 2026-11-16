@@ -2,6 +2,7 @@
 
 一个审核单元 = 一次通过的审核，存成 reviewed.jsonl 里的一行：
 {"tip": 顶端提交号, "fork": 起点提交号, "commits": [起点到顶端这一段的全部提交号], "at": 时间}
+（rollback.py 记的单元多一个 "rollback": true）
 起点是基准和分支的分叉点。审核看的是从起点到顶端这一整段的最终结果，所以一个单元只证明：
 起点那个状态没问题的话，顶端那个状态也没问题。它不证明其中某个提交单独上没问题。
 守卫怎么用这些单元，见 guard.uncovered。
@@ -25,7 +26,8 @@ def _path(cwd, name):
 
 
 def units(cwd):
-    """读出全部审核单元：[{"tip": 提交号, "fork": 提交号, "commits": 提交号集合}]。读不懂的行跳过，不算通过。"""
+    """读出全部审核单元：[{"tip": 提交号, "fork": 提交号, "commits": 提交号集合, "rollback": 是不是回滚记的}]。
+    读不懂的行跳过，不算通过。"""
     p = _path(cwd, UNITS_FILE)
     out = []
     if not p or not os.path.exists(p):
@@ -42,20 +44,23 @@ def units(cwd):
             if not isinstance(commits, list) or tip not in commits:
                 continue
             if all(isinstance(c, str) and SHA_RE.match(c) for c in commits + [fork]):
-                out.append({"tip": tip, "fork": fork, "commits": set(commits)})
+                out.append({"tip": tip, "fork": fork, "commits": set(commits), "rollback": u.get("rollback") is True})
     return out
 
 
-def add_unit(cwd, tip, fork, commits):
-    """记一个审核单元：从 fork（起点）到 tip（顶端）。commits 是这一段的全部提交号，必须包含 tip。"""
+def add_unit(cwd, tip, fork, commits, rollback=False):
+    """记一个审核单元：从 fork（起点）到 tip（顶端）。commits 是这一段（fork..tip）的全部提交号，必须包含 tip。
+    rollback：这是 rollback.py 撤回提交之后记的。"""
     commits = list(commits)
     if tip not in commits or not fork:
         raise ValueError("审核单元要有起点，提交里要有顶端提交")
     p = _path(cwd, UNITS_FILE)
     if not p:
         return
-    line = json.dumps({"tip": tip, "fork": fork, "commits": commits,
-                       "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+    unit = {"tip": tip, "fork": fork, "commits": commits, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    if rollback:
+        unit["rollback"] = True
+    line = json.dumps(unit)
     with open(p, "a", encoding="utf-8") as f:
         try:
             import fcntl

@@ -82,9 +82,10 @@ def main(argv=None):
         shas.append(sha)
     base_sha, branch_sha = shas
 
-    commits = git(cwd, "rev-list", f"{base_sha}..{branch_sha}")
-    # 有没有改动直接比两棵文件树（分叉点的和分支顶端的），不看 git diff 的输出：diff 的输出会被仓库配置影响
+    # 起点是基准和分支的分叉点。审的、记的都是从起点到分支顶端这一段
     fork = git(cwd, "merge-base", base_sha, branch_sha)
+    commits = git(cwd, "rev-list", f"{fork}..{branch_sha}") if fork else None
+    # 有没有改动直接比两棵文件树（起点的和分支顶端的），不看 git diff 的输出：diff 的输出会被仓库配置影响
     trees = [git(cwd, "rev-parse", "--verify", "--quiet", f"{c}^{{tree}}") for c in (fork, branch_sha)] if fork else []
     if commits is None or not fork or not all(trees):
         print(f"审核：出错（不计入失败轮数）\ngit 查不出 {base}...{a.branch} 的改动")
