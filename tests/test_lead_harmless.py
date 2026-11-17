@@ -78,5 +78,34 @@ class LeadHarmlessTest(GuardCase):
             self.deny(self.repo, cmd, "请单独运行")
 
 
+class LeadVerbatimBeatsScanTest(GuardCase):
+    """白名单认过的命令，参数里有 git-push 这类字（拆命令扫描会当成上传），也照样放行；
+    不在白名单里的同类写法照拦；子代理的规则不受影响。"""
+    def setUp(self):
+        super().setUp()
+        self.repo = self.make_repo_with_remote()
+        self.commit(self.repo, "feat")
+
+    def test_参数里带git_push的白名单命令_放行(self):
+        for cmd in ("rg git-push hooks", "cat tools/git-push", "grep -rn git-push .", "ls tools/git-push",
+                    "head -n 3 tools/git-push", "wc -l tools/git-merge", "rtk grep -rn git-push .",
+                    "rg gh-pr-merge hooks", "cat git-push.sh", "python3 -m unittest tests.test_git_push",
+                    "claude stop git-push"):
+            self.allow(self.repo, cmd)
+
+    def test_不在白名单里的同类写法_照拦(self):
+        for cmd in ("less tools/git-push", "sed -n 1p tools/git-push", "find . -name git-push",
+                    "cat tools/git-push; git push", "cat tools/git-push && git push", "cat $(git-push)",
+                    "cat tools/git-push | sh", "tail -f tools/git-push", "rg --pre=git-push x hooks",
+                    "bash tools/git-push", "./tools/git-push", "env git-push"):
+            self.deny(self.repo, cmd)
+
+    def test_子代理和对接窗口_照旧按may_ship拦(self):
+        for r in ("subagent", "kuaixiu"):
+            self.set_state(role=r)
+            for cmd in ("cat tools/git-push", "rg git-push hooks", "grep -rn git-push ."):
+                self.deny(self.repo, cmd)
+
+
 if __name__ == "__main__":
     unittest.main()

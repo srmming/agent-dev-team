@@ -110,7 +110,7 @@ python3 <review.py 路径> --branch <分支> --cwd <任务工作副本> --brief 
 - 「审核：出错（不计入失败轮数）」：找不到审核命令、超时或参数不对。修好再跑，不算子代理失败。
 - 通过：按下面第 8 节的模式分流。通过的是这个分支的整段提交，要整段一起合并、推送；分支上再加提交或 rebase 之后要重审。守卫会查审核记录，没审过的合并、推送不了；被拦时提示里有要跑的审核命令。
 
-清理 = `git worktree remove <路径>`，删任务分支，归档子代理窗口（用归档会话的工具，如果有）。不问用户。普通清理失败（窗口或后台会话还锁着工作副本、分支上有没推送的提交）时，按这个顺序：`claude stop <会话>` → `git worktree unlock <路径>` → `git worktree remove -f <路径>` → `git branch -D <分支>` → `claude rm <会话>`。`claude rm` 遇到没推送的提交会拒删，确认已合并后加 `--discard-unpushed`。
+清理 = `git worktree remove <路径>`，删任务分支，归档子代理窗口（用归档会话的工具，如果有）。不问用户。普通清理失败（窗口或后台会话还锁着工作副本、分支上有没推送的提交）时：`claude stop <会话>` → `git worktree unlock <路径>` → 再跑一次不带 -f 的 `git worktree remove <路径>`。还失败就看 `git -C <路径> status --porcelain`：有输出（有没提交或没跟踪的内容）就不删，保留工作副本，报给用户；没输出、并且分支确认已合并进主分支，才 `git worktree remove -f <路径>` → `git branch -D <分支>` → `claude rm <会话>`（遇到没推送的提交拒删时加 `--discard-unpushed`）。
 
 ## 8. 合并、推送和上线
 

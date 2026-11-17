@@ -1129,6 +1129,21 @@ def _unittest(rest):
     return all(_data(w) for w in rest)
 
 
+def verbatim(words):
+    """逐字白名单：只读查看命令、claude 会话管理、python3 -m unittest。
+    整条命令逐字认过，参数只是路径、搜索词、会话号、模块名，拆命令扫描（scan_ship）从参数里认出的「上传」不作数。"""
+    words = no_rtk(words)
+    if words[:1] and words[0] in VIEWERS:
+        return _viewer(words)
+    if words[:1] == ["claude"]:
+        rest = words[1:]
+        return any(len(rest) == len(f) and all(x == y if x else _data(y) for x, y in zip(f, rest))
+                   for f in CLAUDE_FORMS)
+    if words[:3] == ["python3", "-m", "unittest"]:
+        return _unittest(words[3:])
+    return False
+
+
 def harmless(cwd, words):
     """一条最简单的命令里带着 push / merge 这类词，但确定不是上传的几种：
     git 的只读子命令（git merge-base、git log --merges、git worktree add -b feat/push-x）；
@@ -1139,14 +1154,8 @@ def harmless(cwd, words):
     python3 -m unittest 跑测试（测试本来就能跑任意代码，没这些词时也放行，模块名里带这些词不多出风险）。
     逐字比，不认的写法一律不算。"""
     words = no_rtk(words)
-    if words[:1] and words[0] in VIEWERS:
-        return _viewer(words)
-    if words[:1] == ["claude"]:
-        rest = words[1:]
-        return any(len(rest) == len(f) and all(x == y if x else _data(y) for x, y in zip(f, rest))
-                   for f in CLAUDE_FORMS)
-    if words[:3] == ["python3", "-m", "unittest"]:
-        return _unittest(words[3:])
+    if verbatim(words):
+        return True
     if words[:1] == ["git"]:
         rest = words[3:] if words[1:2] == ["-C"] else words[1:]
         return rest[:1] != [] and rest[0] in GIT_READ
@@ -1375,10 +1384,13 @@ def review_msg(cwd, plan, missing):
 
 def check_upload(cwd, cmd, kinds, semi, codex_off):
     """负责人的一条可能是上传的命令能不能放行。返回拦截原因或 None。
-    放不放行只看 strict_words 给出的词；kinds（拆命令认出来的）只用来多拦、给出更明确的说法。"""
+    放不放行只看 strict_words 给出的词；kinds（拆命令认出来的）只用来多拦、给出更明确的说法。
+    逐字白名单（verbatim）认过的命令先放行：它的参数里出现 git-push 这类字，kinds 也不作数。"""
+    words = strict_words(cmd)
+    if words is not None and verbatim(words):
+        return None
     if semi and kinds & {"pr-merge", "api"}:
         return SEMI_PR
-    words = strict_words(cmd)
     if words is None:
         return UPLOAD_FORM
     plain = no_rtk(words)
