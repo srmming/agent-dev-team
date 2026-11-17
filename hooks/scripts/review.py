@@ -238,8 +238,9 @@ def run_codex(cmd_text, effort, prompt, cwd, schema=None):
                     json.dump(schema, f, ensure_ascii=False)
                 cmd += ["--output-schema", sp]
         try:
-            r = subprocess.run(cmd + [prompt], cwd=cwd, capture_output=True, text=True,
-                               errors="replace", timeout=TIMEOUT)
+            # stdin 给空：继承来的管道不关的话，codex exec 会一直等 stdin 结束直到超时
+            r = subprocess.run(cmd + [prompt], cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
+                               text=True, errors="replace", timeout=TIMEOUT)
         except (FileNotFoundError, PermissionError):
             raise CodexError(f"找不到审核命令 `{cmd[0]}`。安装 Codex 命令行，"
                              "或用项目配置 codex_cmd / 环境变量 AGENT_DEV_TEAM_CODEX_CMD 指定。")
