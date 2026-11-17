@@ -44,10 +44,20 @@ class Docs(unittest.TestCase):
                     name = re.search(r"hooks/scripts/(\w+\.py)", h["command"]).group(1)
                     self.assertTrue(os.path.exists(os.path.join(SCRIPTS, name)), name)
 
-    def test_版本号都是0_2_2(self):
-        self.assertEqual(json.loads(read(".claude-plugin", "plugin.json"))["version"], "0.2.3")
+    def test_版本号互相一致(self):
+        v = json.loads(read(".claude-plugin", "plugin.json"))["version"]
+        self.assertRegex(v, r"^\d+\.\d+\.\d+$")
         for name in ("lead", "kuaixiu", "shouwei", "shuijiao", "qingli"):
-            self.assertIn('version: "0.2.3"', read("skills", name, "SKILL.md"), name)
+            self.assertIn('version: "%s"' % v, read("skills", name, "SKILL.md"), name)
+        self.assertEqual(json.loads(read("statusbar", ".claude-plugin", "plugin.json"))["version"], v)
+
+    def test_没有旧的Notion位置(self):
+        names = sorted(os.listdir(os.path.join(ROOT, "skills")))
+        for name in names:
+            p = os.path.join(ROOT, "skills", name, "SKILL.md")
+            if os.path.exists(p):
+                self.assertNotIn("💻 开发", read("skills", name, "SKILL.md"), name)
+        self.assertNotIn("💻 开发", read("README.md"))
 
     def test_技能长度(self):
         limits = {"lead": 150, "kuaixiu": 50, "shouwei": 50, "shuijiao": 50}
