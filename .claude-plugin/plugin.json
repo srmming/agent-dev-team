@@ -1,6 +1,6 @@
 {
   "name": "agent-dev-team",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Agent 开发团队：负责人只想和调度，子代理写代码，脚本验收，Codex 审核后合并上线。",
   "author": {
     "name": "Ming"
