@@ -1079,12 +1079,74 @@ def simple_upload(cmd):
     return upload_form(words) if words else None
 
 
+DATA_RE = re.compile(r"^[\w./@:,+=%*?-]+$")  # 普通字：路径、搜索词、会话名；不以 - 开头另外查
+# 只读查看命令：命令名 → (可以挤在一起写的短选项字母, 可以单独写的长选项, 带值的长选项前缀)。
+# 只开这些固定选项，别的选项一律不认（rg --pre、grep -f、tail -f、find -exec 这类就不用一个个列）。
+VIEWERS = {
+    "grep": ("rRnilLcwxFEvHhoqsI", set(), ("--include=", "--exclude=", "--exclude-dir=")),
+    "rg": ("nilwxFvHhoscSuL", {"--hidden", "--no-ignore", "--files"}, ("--glob=", "--type=")),
+    "cat": ("n", set(), ()),
+    "head": ("", set(), ()),
+    "tail": ("", set(), ()),
+    "wc": ("lcwm", set(), ()),
+    "ls": ("laAR1htrdS", set(), ()),
+}
+CLAUDE_FORMS = (["rm", None], ["rm", None, "--discard-unpushed"], ["stop", None], ["ls"], ["agents"])
+
+
+def _data(w):
+    return bool(DATA_RE.match(w)) and not w.startswith("-")
+
+
+def _viewer(words):
+    """grep / rg / cat / head / tail / wc / ls：每个词要么是这个命令的固定选项，要么是普通字。
+    head / tail 只认 -n <数字> 和 -<数字>。"""
+    shorts, longs, valued = VIEWERS[words[0]]
+    rest = words[1:]
+    i = 0
+    while i < len(rest):
+        w = rest[i]
+        if words[0] in ("head", "tail") and (re.fullmatch(r"-\d+", w)
+                                             or (w == "-n" and i + 1 < len(rest) and rest[i + 1].isdigit())):
+            i += 2 if w == "-n" else 1
+            continue
+        ok = (_data(w) or w in longs
+              or (re.fullmatch(r"-[A-Za-z]+", w) and shorts and set(w[1:]) <= set(shorts))
+              or any(w.startswith(p) and _data(w[len(p):]) for p in valued))
+        if not ok:
+            return False
+        i += 1
+    return True
+
+
+def _unittest(rest):
+    """python3 -m unittest 之后的词：[-v] 再跟 discover -s <普通字> [-p <普通字>]，或者若干模块名 / 测试路径。"""
+    if rest[:1] == ["-v"]:
+        rest = rest[1:]
+    if rest[:1] == ["discover"]:
+        return (len(rest) in (3, 5) and rest[1] == "-s" and _data(rest[2])
+                and (len(rest) == 3 or (rest[3] == "-p" and _data(rest[4]))))
+    return all(_data(w) for w in rest)
+
+
 def harmless(cwd, words):
-    """一条最简单的命令里带着 push / merge 这类词，但确定不是上传的三种：
+    """一条最简单的命令里带着 push / merge 这类词，但确定不是上传的几种：
     git 的只读子命令（git merge-base、git log --merges、git worktree add -b feat/push-x）；
     gh pr 的只读子命令（gh pr view 12 --json mergeable）；
-    插件自己的脚本（python3 <review.py 的路径> --branch feat/merge-x），verify.py 的 --cmd 里带这些词的不算。"""
+    插件自己的脚本（python3 <review.py 的路径> --branch feat/merge-x），verify.py 的 --cmd 里带这些词的不算；
+    只读查看命令只带固定选项（grep -rn push src、ls merge-notes），这些词只出现在路径、搜索词里；
+    claude rm <会话> [--discard-unpushed]、claude stop <会话>、claude ls、claude agents；
+    python3 -m unittest 跑测试（测试本来就能跑任意代码，没这些词时也放行，模块名里带这些词不多出风险）。
+    逐字比，不认的写法一律不算。"""
     words = no_rtk(words)
+    if words[:1] and words[0] in VIEWERS:
+        return _viewer(words)
+    if words[:1] == ["claude"]:
+        rest = words[1:]
+        return any(len(rest) == len(f) and all(x == y if x else _data(y) for x, y in zip(f, rest))
+                   for f in CLAUDE_FORMS)
+    if words[:3] == ["python3", "-m", "unittest"]:
+        return _unittest(words[3:])
     if words[:1] == ["git"]:
         rest = words[3:] if words[1:2] == ["-C"] else words[1:]
         return rest[:1] != [] and rest[0] in GIT_READ

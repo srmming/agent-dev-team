@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """用户发消息时（UserPromptSubmit）按消息切换这个对话的模式。
 【派活单】开头 → 子代理；【快修】开头 → 对接窗口；桌面应用开新会话时把消息包成
-「Background (from the session that started this one): …… Task: <派活单>」，这种包装也认。
+「Background (from the session that started this one): …… Task: <派活单>」，这种包装也认
+（工作副本里开的会话，最前面还多一段固定的工作副本提醒）。
 整条消息正好是 负责人模式 / 普通对话 / 全自动 / 半自动 → 切到对应模式。
 其他消息：角色和模式和上次告诉模型的一样（大多数时候）就不输出；不一样（比如在状态栏上点了切换）
 就把现在的角色和模式再告诉模型一次。出任何错都安静退出，不影响用户发消息。
@@ -32,9 +33,23 @@ MARKS = ("【派活单】", "【快修】")
 AGENT_LINE = re.compile(r"^子代理\s*[：:]\s*([A-Za-z0-9_.-]+)\s*[·・]\s*(低|中|高)\s*$")
 
 
+# 桌面应用在工作副本里开新会话时，第一条消息最前面还有这样一段固定的提醒（逐字比，只认消息开头这一段）
+WORKTREE_NOTE = re.compile(r"<system-reminder>\nYou are operating in a git worktree\.\n"
+                           r"Worktree path: [^\n]+\nWorktree name: [^\n]+\n</system-reminder>\n+")
+
+
 def unwrap(text):
     """消息开头是【派活单】/【快修】就原样返回；是桌面应用的包装（以 WRAP_HEAD 开头，某行正好是 Task:，
-    它下一个非空行以【派活单】/【快修】开头）就返回从那一行起的内容；别的返回原文（不会被认成派活单）。"""
+    它下一个非空行以【派活单】/【快修】开头）就返回从那一行起的内容；别的返回原文（不会被认成派活单）。
+    最前面有一段工作副本提醒（WORKTREE_NOTE）的，剥掉这一段再按上面认；认不出派活单 / 快修就还是返回原文。"""
+    m = WORKTREE_NOTE.match(text)
+    if m:
+        inner = _unwrap(text[m.end():])
+        return inner if inner.startswith(MARKS) else text
+    return _unwrap(text)
+
+
+def _unwrap(text):
     if text.startswith(MARKS) or not text.startswith(WRAP_HEAD):
         return text
     lines = text.splitlines()

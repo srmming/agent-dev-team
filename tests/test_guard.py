@@ -1593,7 +1593,7 @@ class UploadGateTest(GuardCase):
                     "watch -n1 'git push'", "ssh host 'git merge feat'", "su -c 'git push'", "./push.sh", "make push",
                     "npm run push", "bash deploy-and-push.sh", "gp() { command git pus''h; }; gp", "hub push origin main",
                     "git config alias.p push", "gh alias set pm 'pr merge'", "git pu\\sh origin main",
-                    "git $'pu\\x73h'", 'grep "git push" README.md', "echo merge", "cat docs/merge.md",
+                    "git $'pu\\x73h'", "echo merge",
                     "git fetch origin feat/merge-x", "python3 other.py --branch feat/merge-x",
                     "git log --merges | head -3", "cd . && git merge-base main feat", "gh pr view 1 --json mergeable | cat",
                     "gh pr  create --fill; true", NESTED_QUOTES):

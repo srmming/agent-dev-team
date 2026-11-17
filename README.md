@@ -83,7 +83,7 @@
 
 切换后 AI 用一句话告诉你切好了。切到「负责人模式」「普通对话」时，钩子还会把这个角色的提示一起交给 AI。点状态栏按钮只改状态文件，AI 当时不知道；你发下一条消息时，钩子发现角色或模式和上次告诉 AI 的不一样，就把现在的角色提示交给 AI（没变就什么都不加）。上次告诉 AI 的是什么，记在对话状态文件旁边的 `<session_id>.told` 里。
 
-另外两种由负责人自动使用：消息以 `【派活单】` 开头，窗口变成子代理（附上子代理守则）；以 `【快修】` 开头，窗口变成对接窗口。桌面应用开新会话时会把消息包成 `Background (from the session that started this one):` 开头、`Task:` 下一行才是派活单的样子，这种包装也认；别的位置出现 `【派活单】` 不算。认出派活单时，钩子把任务名（`【派活单】` 后到行尾）和第二行 `子代理：<名字> · <档位>` 存进对话状态文件的 `task`、`agent`、`effort`，状态栏靠它显示子代理和档位；没有第二行就只存 `task`。
+另外两种由负责人自动使用：消息以 `【派活单】` 开头，窗口变成子代理（附上子代理守则）；以 `【快修】` 开头，窗口变成对接窗口。桌面应用开新会话时会把消息包成 `Background (from the session that started this one):` 开头、`Task:` 下一行才是派活单的样子，这种包装也认；在工作副本里开的会话，包装前面还有一段固定的 `<system-reminder>You are operating in a git worktree…</system-reminder>` 提醒，只认消息开头逐字一样的这一段；别的位置出现 `【派活单】` 不算。认出派活单时，钩子把任务名（`【派活单】` 后到行尾）和第二行 `子代理：<名字> · <档位>` 存进对话状态文件的 `task`、`agent`、`effort`，状态栏靠它显示子代理和档位；没有第二行就只存 `task`。
 
 ## 五个脚本
 
@@ -175,8 +175,8 @@
   - 要上传的提交 = 「远端的那个分支..要推的分支」。远端还没有这个分支时，从远端的主分支（远端的 HEAD、main、master）算起。
 - `gh pr create ...`：只认 `--head`、`--base`、`--title`、`--body`、`--fill`、`--draft` 这类选项；`-R` / `--repo`、`--web`、多余的参数都拦。查的是本地的 head 分支（不写就是当前分支），要上传的提交 = 「远端的 base 分支..head 分支」。
 - `gh pr merge` 和 `gh api` 的写操作：负责人一律拦，守卫查不出会上传什么。全自动用 `git merge` 再 `git push`。
-- 带着这些词、但确定不是上传的三种放行（同样要先通过第二步的检查）：git 的只读子命令（`git merge-base`、`git log --merges`、`git branch --merged`、`git worktree add -b feat/push-x ...`，子命令限 `log` `diff` `show` `status` `branch` `worktree` `merge-base` `rev-parse` `rev-list` `blame` `describe` `shortlog` `reflog` `revert` `ls-files` `for-each-ref` `show-ref` `tag`）；`gh pr view / list / checks / status / diff`；插件自己的脚本（`python3 <review.py 的路径> --branch feat/merge-x`，`verify.py` 的 `--cmd` 里带这些词的不算）。
-- 其余带着这些词的命令一律拦：`grep "git push" 文件`、`make push`、`./merge.sh`、`python3 -c "...push..."` 都在内。
+- 带着这些词、但确定不是上传的几种放行（同样要先通过第二步的检查）：git 的只读子命令（`git merge-base`、`git log --merges`、`git branch --merged`、`git worktree add -b feat/push-x ...`，子命令限 `log` `diff` `show` `status` `branch` `worktree` `merge-base` `rev-parse` `rev-list` `blame` `describe` `shortlog` `reflog` `revert` `ls-files` `for-each-ref` `show-ref` `tag`）；`gh pr view / list / checks / status / diff`；插件自己的脚本（`python3 <review.py 的路径> --branch feat/merge-x`，`verify.py` 的 `--cmd` 里带这些词的不算）；只带固定选项的只读查看命令 `grep` `rg` `cat` `head` `tail` `wc` `ls`（`grep -rn push src`、`ls merge-notes`，选项逐个比白名单，别的词必须是不以 `-` 开头的普通字，`rg --pre`、`grep -f`、`tail -f` 这类不认；`find` 不放）；`claude rm <会话> [--discard-unpushed]`、`claude stop <会话>`、`claude ls`、`claude agents`；`python3 -m unittest [-v] [discover -s <目录> [-p <模式>]]` 或跟模块名（测试本来就能跑任意代码，当受信任入口）。
+- 其余带着这些词的命令一律拦：`grep "git push" 文件`（词里有空格）、`make push`、`./merge.sh`、`python3 -c "...push..."` 都在内。
 - 查不了就拦：不在 git 仓库里、仓库没有远端却要推送、远端还没有任何分支（第一次推送，请用户自己推）、找不到分支、git 出错。
 - 上面都过了，再按「审核记录」的查法查要上传的提交。有没审核的就拦，提示里给出要跑的审核命令。守卫自己不跑 Codex。
 
@@ -242,7 +242,7 @@
   - 负责人的黑名单只拦列出来的命令。
 - 子代理和对接窗口的禁推只防手误。除了上面这些，带着上传字样的刻意写法它也可能认不出：`python3 -c "...git push..."`、`watch 'git push'`、`su -c`、`ssh 主机 '...'`、`git rebase --exec`、`PS4='$(...)'; set -x`、zsh 特有的冷门写法，以及任何守卫拆得和真 shell 不一样的写法。同样的命令到了负责人那边会被拦。
 - 负责人的上传关是保守判断，下面这些会被误拦：
-  - 带着 `push` / `merge` 这些词、又不在放行名单里的只读命令：`grep -rn merge src`、`cat docs/push.md`、`git fetch origin feat/merge-x`、`git log --merges | head`。换个写法，或者派给子代理。分支名、文件名最好别带这些词。
+  - 带着 `push` / `merge` 这些词、又不在放行名单里的只读命令：`grep -e merge src`、`find . -name '*push*'`、`git fetch origin feat/merge-x`、`git log --merges | head`。换个写法，或者派给子代理。分支名、文件名最好别带这些词。
   - 上传命令和别的东西写在一起：`cd x && git push`、`git push | tail`、`git push 2>&1`、`git merge x && git push`。分开单独运行，不加重定向。
   - 合并说明、PR 标题和正文里有 `$`、反引号、反斜杠、`!` 而用了双引号，或者用了 `$(cat <<'EOF' ...)`。写在单引号里；正文里要有单引号的话，用 `--body-file` 先让子代理把正文写成文件。
   - 强推、删远端分支、推标签、第一次推送到空的远端：这些请用户自己做，或者用户先说「普通对话」。

@@ -2,7 +2,7 @@
 name: kuaixiu
 description: "快修：开一个对接窗口，让用户亲自和 AI 一起做简单沟通和小改动。 用户对负责人说\"快修\"、\"我来一起改\"、\"开个对接窗口\"、\"我要自己调一下前端 / 流程\"时使用。\n"
 metadata:
-  version: "0.2.4"
+  version: "0.2.5"
 ---
 
 # 快修（对接窗口）
@@ -27,7 +27,7 @@ metadata:
 1. 照任务卡记下的范围和命令验收，只看结论：
    `python3 <verify.py 路径> --branch kuaixiu/<slug> --cwd <工作副本> --allow "<允许改的文件>" --cmd "<验收命令>"`
 2. 改动超出「小改动」的范围，就拆成普通任务重新派。
-3. 用 `python3 <review.py 路径> --branch kuaixiu/<slug>` 审核。
+3. 用 `python3 <review.py 路径> --branch kuaixiu/<slug> --cwd <工作副本> --brief "<目标、完成标准、已经定下的取舍>"` 审核。
 4. 审核通过后，按 lead 技能第 8 节的模式合并（或开 PR）、清理、上线检查，更新任务卡。清理时也归档对接窗口（用归档会话的工具，如果有）。
 
 脚本的绝对路径见会话开始时的提示。
