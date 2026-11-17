@@ -17,6 +17,12 @@ class LeadWindowDispatch(unittest.TestCase):
         self.assertIn("use_worktree 为 true", SKILL)
         self.assertIn("信任工作区", SKILL)
 
+    def test_fallback_paths_build_worktree_themselves(self):
+        kx = (Path(__file__).resolve().parent.parent / "skills" / "kuaixiu" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("没有开新会话的工具时，负责人先自己建分支和独立工作副本", kx)
+        self.assertIn("git worktree add -b kuaixiu/<slug>", kx)
+        self.assertIn("由负责人先自己建分支和工作副本", SKILL)
+
 
 if __name__ == "__main__":
     unittest.main()
