@@ -140,7 +140,7 @@
   3. 上传关：见下面。它不靠拆命令。
   4. 半自动：有远端时拦在主分支上 `git merge <分支>`、拦推到主分支（推送看推到的那个远端自己的主分支：origin 的是 main、upstream 的是 master 时，推到 upstream 的 master 也拦）；`gh pr merge` 和 `gh api` 的写操作一律拦，PR 由用户自己点合并。查不出主分支是哪个时也拦。
 - 普通命令遇到守卫自己出错一律放行。负责人的上传命令遇到守卫出错、git 出错、查不出要上传什么，一律拦。
-- 守卫自己限时 20 秒（钩子的超时是 30 秒，钩子超时会被当成放行）。命令一读进来就登记，超时的时候（哪怕还在认角色），命令原文里出现 `push` / `merge` 这类词或者 `gh` 就拦，其余放行。
+- 守卫自己限时 20 秒（钩子的超时是 30 秒）。钩子设了 `onFailure: "block"`（Claude Code 2.1.295 起生效）：守卫没能启动、崩溃退出或被 30 秒超时杀掉时，这次工具调用被拦，不再放行；旧版本忽略这个字段，照旧放行。命令一读进来就登记，超时的时候（哪怕还在认角色），命令原文里出现 `push` / `merge` 这类词或者 `gh` 就拦，其余放行。
 
 上传动作指：`git push`、`git merge`、`gh pr create`、`gh pr merge`、`gh api` 的写操作。
 
@@ -218,6 +218,14 @@
 | `codex_cmd` | 审核命令。不写就用 `codex exec --sandbox read-only -c model_reasoning_effort=max -c service_tier=priority`，型号跟着本机 Codex 配置走，速度固定快速模式 |
 
 数字写错了（不是数字或是负数）按默认值算。
+
+## 子代理定义的默认值
+
+四个 `agents/dev-*.md` 写了起始档位 `effort` 和轮数上限 `maxTurns`：dev-haiku low / 60，dev-sonnet medium / 150，dev-opus medium / 200，dev-fable high / 250。只对后台子代理（Agent 工具）生效；派活时带的 `effort` 参数优先。到了轮数上限，交回会标成没做完，负责人恢复它接着做。窗口子代理不读这些定义。
+
+## 建议：主分支保护
+
+守卫是本机护栏，审核记录也在本机。真正挡住没审过的代码进主分支，靠 GitHub 的分支保护：Settings → Branches（或 Rules → Rulesets）给主分支加规则，勾上「必须通过 PR 合并」「禁止强推」「禁止删除」。开了之后全自动模式直接推主分支会被 GitHub 拒绝，要改走 PR（半自动本来就是）。
 
 ## 需要
 

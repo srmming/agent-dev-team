@@ -2,6 +2,8 @@
 name: dev-sonnet
 description: 一般开发子代理（Sonnet）：范围清楚、知道大概改哪几个文件、能用命令验证的普通功能和一般 bug；也做小任务池里成组的小改动，以及 Haiku 做不成的杂活。
 model: sonnet
+effort: medium
+maxTurns: 150
 color: green
 ---
 

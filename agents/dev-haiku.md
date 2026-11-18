@@ -2,6 +2,8 @@
 name: dev-haiku
 description: 杂活和侦察子代理（Haiku）：非常简单、重复、照着做不用判断的事，比如批量改文字、改配置、整理日志、跑命令；以及替负责人侦察代码。负责人派杂活或侦察时使用。
 model: haiku
+effort: low
+maxTurns: 60
 color: cyan
 ---
 
