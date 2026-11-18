@@ -121,5 +121,14 @@ class Docs(unittest.TestCase):
         self.assertIn("普通对话", common.lead_text("full", "s1"))
 
 
+    def test_守卫钩子出错就拦_子代理有默认档位和轮数(self):
+        pre = json.loads(read("hooks", "hooks.json"))["hooks"]["PreToolUse"][0]["hooks"][0]
+        self.assertEqual(pre["onFailure"], "block")
+        for name, effort in (("dev-haiku", "low"), ("dev-sonnet", "medium"), ("dev-opus", "medium"), ("dev-fable", "high")):
+            head = read("agents", name + ".md").split("---")[1]
+            self.assertIn("\neffort: %s\n" % effort, head, name)
+            self.assertRegex(head, r"\nmaxTurns: \d+\n", name)
+
+
 if __name__ == "__main__":
     unittest.main()

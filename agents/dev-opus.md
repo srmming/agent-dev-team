@@ -2,6 +2,8 @@
 name: dev-opus
 description: 主力开发子代理（Opus）：范围不清、要做设计取舍、跨模块、难查的 bug 归它，新功能用中档，修 bug 用高档；以及 Sonnet 高档仍做不成的任务。
 model: opus
+effort: medium
+maxTurns: 200
 color: blue
 ---
 

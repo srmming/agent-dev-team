@@ -2,6 +2,8 @@
 name: dev-fable
 description: 重构级子代理（Fable）：重构、改架构、跨多个模块的任务；负责人判断是能力不够（Opus 试过仍不成）时才派。
 model: fable
+effort: high
+maxTurns: 250
 color: magenta
 ---
 
